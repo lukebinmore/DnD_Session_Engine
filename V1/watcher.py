@@ -42,8 +42,11 @@ def load_settings():
 def get_latest_prompt(tabs_list, templates_dict):
     """Re-reads prompt.txt fresh from disk each time."""
     with open(PROMPT_PATH, "r") as f:
-        prompt_template = f.read()
-    return prompt_template.format(tabs_list=json.dumps(tabs_list), templates_dict=json.dumps(templates_dict))
+        prompt_text = f.read()
+
+    prompt_text = prompt_text.replace("{tabs_list}", json.dumps(tabs_list))
+    prompt_text = prompt_text.replace("{templates_dict}", json.dumps(templates_dict))
+    return prompt_text
 
 
 # Authenticate Google APIs
