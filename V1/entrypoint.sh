@@ -1,15 +1,18 @@
 #!/bin/sh
 set -e
 
-# Seed default files into /app only if they do not already exist on the host
-for file in watcher.py doc_updater.py prompt.txt; do
+# Always copy core application code from image to ensure container updates take effect
+echo "[Init] Syncing engine scripts..."
+cp -f /defaults/watcher.py /app/watcher.py
+
+# Only seed prompt.txt and doc_updater.py if they don't already exist on the host
+for file in doc_updater.py prompt.txt; do
   if [ ! -f "/app/$file" ]; then
     echo "[Init] Seeding default $file into /app..."
     cp "/defaults/$file" "/app/$file"
   fi
 done
 
-# Inform user if service_account.json is still needed
 if [ ! -f "/app/service_account.json" ]; then
   echo "===================================================================="
   echo "[WARNING] service_account.json not found in /app!"
@@ -17,5 +20,4 @@ if [ ! -f "/app/service_account.json" ]; then
   echo "===================================================================="
 fi
 
-# Run the watcher directly from /app
-exec python /app/watcher.py
+exec python -u /app/watcher.py
