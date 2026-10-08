@@ -1,0 +1,16 @@
+# Ignore secrets in root and all subdirectories
+**/service_account.json
+service_account.json
+**/config.json
+config.json
+
+# Transient files
+*.m4a
+*.mp3
+*.wav
+*.aac
+/tmp/
+**/__pycache__/
+*.pyc
+.env
+venv/

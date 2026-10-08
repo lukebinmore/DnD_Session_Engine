@@ -1,0 +1,49 @@
+name: Build and Publish Container Image
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "V1/**"
+      - ".github/workflows/docker-publish.yml"
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: lukebinmore/dnd_session_engine
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: actions/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./V1
+          file: ./V1/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/lukebinmore/dnd_session_engine:v1
+            ghcr.io/lukebinmore/dnd_session_engine:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
