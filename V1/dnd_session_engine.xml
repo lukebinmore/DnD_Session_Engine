@@ -2,56 +2,17 @@
 <Container version="2">
   <Name>DnD_Session_Engine_V1</Name>
   <Repository>ghcr.io/lukebinmore/dnd_session_engine:v1</Repository>
-  <Registry>https://ghcr.io</Registry>
+  <Registry>https://ghcr.io/lukebinmore/dnd_session_engine</Registry>
   <Network>bridge</Network>
-  <MyIP/>
-  <Shell>sh</Shell>
   <Privileged>false</Privileged>
-  <Support/>
+  <Support>https://github.com/lukebinmore/DnD_Session_Engine/issues</Support>
   <Project>https://github.com/lukebinmore/DnD_Session_Engine</Project>
-  <Overview>Watches Google Drive for D&amp;D session audio recordings, processes them with Gemini 2.5 Flash, and automatically updates Google Docs notes, recaps, and lore tabs.</Overview>
-  <Category>Productivity: Tools:</Category>
-  <WebUI/>
-  <TemplateURL/>
-  <Icon>https://raw.githubusercontent.com/walkxcode/dashboard-icons/main/png/dungeons-and-dragons.png</Icon>
-  <ExtraParams/>
-  <PostArgs/>
-  <CPUset/>
-  <DateInstalled/>
-  <DonateText/>
-  <DonateLink/>
-  <Description>Containerized D&amp;D session processing engine (V1).</Description>
-  <Networking>
-    <Mode>bridge</Mode>
-    <Publish/>
-  </Networking>
-  <Data>
-    <Volume>
-      <HostDir>/mnt/user/appdata/DnD_Session_Engine/V1</HostDir>
-      <ContainerDir>/app</ContainerDir>
-      <Mode>rw</Mode>
-    </Volume>
-  </Data>
-  <Environment>
-    <Variable>
-      <Value/>
-      <Name>GEMINI_API_KEY</Name>
-      <Mode/>
-    </Variable>
-    <Variable>
-      <Value>60</Value>
-      <Name>CHECK_INTERVAL_SECONDS</Name>
-      <Mode/>
-    </Variable>
-    <Variable>
-      <Value/>
-      <Name>CAMPAIGN_FOLDERS</Name>
-      <Mode/>
-    </Variable>
-  </Environment>
-  <Labels/>
-  <Config Name="App Directory" Target="/app" Default="/mnt/user/appdata/DnD_Session_Engine/V1" Mode="rw" Description="Folder containing service_account.json, prompt.txt, config.json, and doc_updater.py" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/DnD_Session_Engine/V1</Config>
-  <Config Name="Gemini API Key" Target="GEMINI_API_KEY" Default="" Mode="" Description="API Key from Google AI Studio (optional if defined in config.json)" Type="Variable" Display="always" Required="false" Mask="true"/>
-  <Config Name="Check Interval (Seconds)" Target="CHECK_INTERVAL_SECONDS" Default="60" Mode="" Description="Polling interval in seconds for checking Google Drive" Type="Variable" Display="always" Required="false" Mask="false">60</Config>
-  <Config Name="Campaign Folders (Optional Override)" Target="CAMPAIGN_FOLDERS" Default="" Mode="" Description="Comma-separated Google Drive folder IDs (optional if defined in config.json)" Type="Variable" Display="always" Required="false" Mask="false"/>
+  <Overview>Automatic D&amp;D Session Transcriber, Summarizer, and Google Docs Multi-Tab Engine powered by Google Gemini 2.5/3.8 Flash.</Overview>
+  <Category>Productivity: Tools: Utilities:</Category>
+  <Icon>https://raw.githubusercontent.com/walkxcode/dashboard-icons/main/png/google-drive.png</Icon>
+  <Config Name="App Directory" Target="/app" Default="/mnt/user/appdata/DnD_Session_Engine/V1" Mode="rw" Description="Host path containing service_account.json and dynamic script files." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/DnD_Session_Engine/V1</Config>
+  <Config Name="Gemini API Key" Target="GEMINI_API_KEY" Default="" Mode="" Description="API Key for Google Gemini Studio" Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="Gemini Model" Target="GEMINI_MODEL" Default="gemini-3.8-flash" Mode="" Description="Gemini model identifier (e.g. gemini-3.8-flash, gemini-2.5-flash, gemini-3.5-pro)" Type="Variable" Display="always" Required="false" Mask="false">gemini-3.8-flash</Config>
+  <Config Name="Campaign Folders" Target="CAMPAIGN_FOLDERS" Default="" Mode="" Description="Comma-separated Google Drive Folder IDs of campaign root folders to watch." Type="Variable" Display="always" Required="true" Mask="false"/>
+  <Config Name="Check Interval (Seconds)" Target="CHECK_INTERVAL_SECONDS" Default="60" Mode="" Description="Polling interval to check Google Drive folders for new audio." Type="Variable" Display="advanced" Required="false" Mask="false">60</Config>
 </Container>

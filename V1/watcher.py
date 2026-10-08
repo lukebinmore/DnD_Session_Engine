@@ -27,6 +27,7 @@ except ImportError:
 def load_settings():
     """Reads configuration directly from Unraid environment variables."""
     gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    model_name = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash").strip()
 
     try:
         interval = int(os.environ.get("CHECK_INTERVAL_SECONDS", "60"))
@@ -36,14 +37,18 @@ def load_settings():
     raw_folders = os.environ.get("CAMPAIGN_FOLDERS", "")
     campaign_folders = [f.strip() for f in raw_folders.split(",") if f.strip()]
 
-    return {"gemini_api_key": gemini_key, "check_interval_seconds": interval, "campaign_folders": campaign_folders}
+    return {
+        "gemini_api_key": gemini_key,
+        "gemini_model": model_name,
+        "check_interval_seconds": interval,
+        "campaign_folders": campaign_folders,
+    }
 
 
 def get_latest_prompt(tabs_list, templates_dict):
     """Re-reads prompt.txt fresh from disk each time."""
     with open(PROMPT_PATH, "r") as f:
         prompt_text = f.read()
-
     prompt_text = prompt_text.replace("{tabs_list}", json.dumps(tabs_list))
     prompt_text = prompt_text.replace("{templates_dict}", json.dumps(templates_dict))
     return prompt_text
@@ -90,7 +95,7 @@ def inspect_doc(doc_id):
     return tabs_list, templates_dict
 
 
-def process_file(file_meta, campaign_name, doc_id, gemini_client):
+def process_file(file_meta, campaign_name, doc_id, gemini_client, model_name):
     file_id = file_meta["id"]
     file_name = file_meta["name"]
     local_path = f"/tmp/{file_name}"
@@ -112,9 +117,9 @@ def process_file(file_meta, campaign_name, doc_id, gemini_client):
         tabs_list, templates_dict = inspect_doc(doc_id)
         prompt = get_latest_prompt(tabs_list, templates_dict)
 
-        print(f"[{campaign_name}] Gemini processing audio...")
+        print(f"[{campaign_name}] Gemini processing audio using {model_name}...")
         response = gemini_client.models.generate_content(
-            model="gemini-2.5-flash",
+            model=model_name,
             contents=[audio_file, prompt],
             config=types.GenerateContentConfig(response_mime_type="application/json"),
         )
@@ -158,6 +163,7 @@ def discover_and_process():
         return
 
     gemini_client = genai.Client(api_key=settings["gemini_api_key"])
+    model_name = settings["gemini_model"]
 
     for campaign_folder_id in settings["campaign_folders"]:
         try:
@@ -203,7 +209,7 @@ def discover_and_process():
                 name = audio_file["name"].lower()
                 if name.endswith((".m4a", ".mp3", ".wav", ".aac", ".ogg")):
                     print(f"[{campaign_name}] Detected new recording: {audio_file['name']}")
-                    process_file(audio_file, campaign_name, doc_id, gemini_client)
+                    process_file(audio_file, campaign_name, doc_id, gemini_client, model_name)
 
         except Exception as e:
             print(f"Error scanning folder {campaign_folder_id}: {e}")
