@@ -1,100 +1,57 @@
 <?xml version="1.0"?>
 <Container version="2">
-	<Name>
-		DnD_Session_Engine_V1
-	</Name>
-	<Repository>
-		dnd_session_engine:v1
-	</Repository>
-	<Registry />
-	<Network>
-		bridge
-	</Network>
-	<MyIP />
-	<Shell>
-		sh
-	</Shell>
-	<Privileged>
-		false
-	</Privileged>
-	<Support />
-	<Project>
-		https://github.com/lukebinmore/DnD_Session_Engine
-	</Project>
-	<Overview>
-		Watches Google Drive for D&amp;D session audio recordings, processes them with Gemini 2.5 Flash, and automatically updates Google Docs notes, recaps, and lore tabs.
-	</Overview>
-	<Category>
-		Productivity: Tools:
-	</Category>
-	<WebUI />
-	<TemplateURL />
-	<Icon>
-		https://raw.githubusercontent.com/walkxcode/dashboard-icons/main/png/dungeons-and-dragons.png
-	</Icon>
-	<ExtraParams />
-	<PostArgs />
-	<CPUset />
-	<DateInstalled>
-	</DateInstalled>
-	<DonateText />
-	<DonateLink />
-	<Description>
-		Containerized D&amp;D session processing engine (V1).
-	</Description>
-	<Networking>
-		<Mode>
-			bridge
-		</Mode>
-		<Publish />
-	</Networking>
-	<Data>
-		<Volume>
-			<HostDir>
-				/mnt/user/appdata/DnD_Session_Engine/V1
-			</HostDir>
-			<ContainerDir>
-				/app
-			</ContainerDir>
-			<Mode>
-				rw
-			</Mode>
-		</Volume>
-	</Data>
-	<Environment>
-		<Variable>
-			<Value>
-			</Value>
-			<Name>
-				Gemini API Key
-			</Name>
-			<Mode />
-		</Variable>
-		<Variable>
-			<Value>
-				60
-			</Value>
-			<Name>
-				Check Interval (Seconds)
-			</Name>
-			<Mode />
-		</Variable>
-		<Variable>
-			<Value>
-			</Value>
-			<Name>
-				Campaign Folders (Optional Override)
-			</Name>
-			<Mode />
-		</Variable>
-	</Environment>
-	<Labels />
-	<Config Name="App Directory" Target="/app" Default="/mnt/user/appdata/DnD_Session_Engine/V1" Mode="rw" Description="Folder containing service_account.json, prompt.txt, config.json, and doc_updater.py" Type="Path" Display="always" Required="true" Mask="false">
-		/mnt/user/appdata/DnD_Session_Engine/V1
-	</Config>
-	<Config Name="Gemini API Key" Target="GEMINI_API_KEY" Default="" Mode="" Description="API Key from Google AI Studio (optional if defined in config.json)" Type="Variable" Display="always" Required="false" Mask="true" />
-	<Config Name="Check Interval (Seconds)" Target="CHECK_INTERVAL_SECONDS" Default="60" Mode="" Description="Polling interval in seconds for checking Google Drive" Type="Variable" Display="always" Required="false" Mask="false">
-		60
-	</Config>
-	<Config Name="Campaign Folders (Optional Override)" Target="CAMPAIGN_FOLDERS" Default="" Mode="" Description="Comma-separated Google Drive folder IDs (optional if defined in config.json)" Type="Variable" Display="always" Required="false" Mask="false" />
+  <Name>DnD_Session_Engine_V1</Name>
+  <Repository>ghcr.io/lukebinmore/dnd_session_engine:v1</Repository>
+  <Registry>https://ghcr.io</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support/>
+  <Project>https://github.com/lukebinmore/DnD_Session_Engine</Project>
+  <Overview>Watches Google Drive for D&amp;D session audio recordings, processes them with Gemini 2.5 Flash, and automatically updates Google Docs notes, recaps, and lore tabs.</Overview>
+  <Category>Productivity: Tools:</Category>
+  <WebUI/>
+  <TemplateURL/>
+  <Icon>https://raw.githubusercontent.com/walkxcode/dashboard-icons/main/png/dungeons-and-dragons.png</Icon>
+  <ExtraParams/>
+  <PostArgs/>
+  <CPUset/>
+  <DateInstalled/>
+  <DonateText/>
+  <DonateLink/>
+  <Description>Containerized D&amp;D session processing engine (V1).</Description>
+  <Networking>
+    <Mode>bridge</Mode>
+    <Publish/>
+  </Networking>
+  <Data>
+    <Volume>
+      <HostDir>/mnt/user/appdata/DnD_Session_Engine/V1</HostDir>
+      <ContainerDir>/app</ContainerDir>
+      <Mode>rw</Mode>
+    </Volume>
+  </Data>
+  <Environment>
+    <Variable>
+      <Value/>
+      <Name>GEMINI_API_KEY</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value>60</Value>
+      <Name>CHECK_INTERVAL_SECONDS</Name>
+      <Mode/>
+    </Variable>
+    <Variable>
+      <Value/>
+      <Name>CAMPAIGN_FOLDERS</Name>
+      <Mode/>
+    </Variable>
+  </Environment>
+  <Labels/>
+  <Config Name="App Directory" Target="/app" Default="/mnt/user/appdata/DnD_Session_Engine/V1" Mode="rw" Description="Folder containing service_account.json, prompt.txt, config.json, and doc_updater.py" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/DnD_Session_Engine/V1</Config>
+  <Config Name="Gemini API Key" Target="GEMINI_API_KEY" Default="" Mode="" Description="API Key from Google AI Studio (optional if defined in config.json)" Type="Variable" Display="always" Required="false" Mask="true"/>
+  <Config Name="Check Interval (Seconds)" Target="CHECK_INTERVAL_SECONDS" Default="60" Mode="" Description="Polling interval in seconds for checking Google Drive" Type="Variable" Display="always" Required="false" Mask="false">60</Config>
+  <Config Name="Campaign Folders (Optional Override)" Target="CAMPAIGN_FOLDERS" Default="" Mode="" Description="Comma-separated Google Drive folder IDs (optional if defined in config.json)" Type="Variable" Display="always" Required="false" Mask="false"/>
 </Container>
