@@ -2,11 +2,18 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install dependencies
+ENV PYTHONUNBUFFERED=1
+
+# Install Google SDKs
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Force stdout/stderr flushing so logs appear immediately in Unraid
-ENV PYTHONUNBUFFERED=1
+# Store fallback defaults inside the container image
+RUN mkdir /defaults
+COPY watcher.py doc_updater.py prompt.txt /defaults/
 
-CMD ["python", "watcher.py"]
+# Set up entrypoint script
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
