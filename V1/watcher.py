@@ -5,6 +5,7 @@ import io
 import time
 import mimetypes
 import importlib
+import re
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
@@ -17,7 +18,6 @@ sys.path.insert(0, BASE_DIR)
 SERVICE_ACCOUNT_PATH = os.path.join(BASE_DIR, "service_account.json")
 PROMPT_PATH = os.path.join(BASE_DIR, "prompt.txt")
 
-# Dynamically import external doc_updater
 try:
     import doc_updater
 except ImportError:
@@ -25,10 +25,8 @@ except ImportError:
 
 
 def load_settings():
-    """Reads configuration directly from Unraid environment variables."""
     gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
-    model_name = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash").strip()
-
+    model_name = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip()
     try:
         interval = int(os.environ.get("CHECK_INTERVAL_SECONDS", "60"))
     except ValueError:
@@ -45,16 +43,6 @@ def load_settings():
     }
 
 
-def get_latest_prompt(tabs_list, templates_dict):
-    """Re-reads prompt.txt fresh from disk each time."""
-    with open(PROMPT_PATH, "r") as f:
-        prompt_text = f.read()
-    prompt_text = prompt_text.replace("{tabs_list}", json.dumps(tabs_list))
-    prompt_text = prompt_text.replace("{templates_dict}", json.dumps(templates_dict))
-    return prompt_text
-
-
-# Authenticate Google APIs
 creds = service_account.Credentials.from_service_account_file(
     SERVICE_ACCOUNT_PATH, scopes=["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/documents"]
 )
@@ -62,37 +50,110 @@ drive_service = build("drive", "v3", credentials=creds)
 docs_service = build("docs", "v1", credentials=creds)
 
 
-def inspect_doc(doc_id):
-    """Inspects the Google Doc for existing tab names and template definitions."""
-    doc = docs_service.documents().get(documentId=doc_id, includeTabsContent=True).execute()
-    tabs_list = []
-    templates_dict = {}
+def parse_line_instruction(raw_text):
+    """
+    Parses a template line to isolate label/tags from bracketed instructions in ().
+    Preserves brackets [...] like [gk5] or [0j9].
+    Matches strictly at most one pair of () at the end of the line.
+    """
+    clean_text = raw_text.strip()
+    match = re.search(r"^(.*?)\s*\(([^()]+)\)\s*$", clean_text)
+    if match:
+        label = match.group(1).strip()
+        instruction = match.group(2).strip()
+        return label, instruction
+    return clean_text, ""
 
-    def scan(tab_list):
+
+def inspect_doc(doc_id):
+    """
+    Scans the Google Doc hierarchy:
+      - root_tab_id: The top-level root tab (Depth 0)
+      - available_sections: Direct child tabs inside Root (Depth 1)
+      - tabs_info: Map of tab_title -> {tab_id, parent_tab_id, depth}
+      - templates_dict: Map of template_name -> field definitions
+      - latest_session_num: Highest session number found
+    """
+    doc = docs_service.documents().get(documentId=doc_id, includeTabsContent=True).execute()
+    tabs_info = {}
+    templates_dict = {}
+    session_numbers = []
+    available_sections = []
+    root_tab_id = None
+
+    raw_tabs = doc.get("tabs", [])
+    if raw_tabs:
+        root_tab_id = raw_tabs[0].get("tabProperties", {}).get("tabId")
+
+    def scan(tab_list, parent_id=None, depth=0):
         for tab in tab_list:
             props = tab.get("tabProperties", {})
+            tab_id = props.get("tabId")
             title = props.get("title", "").strip()
+
             if title:
-                tabs_list.append(title)
+                tabs_info[title] = {"tab_id": tab_id, "parent_tab_id": parent_id, "depth": depth}
+
+                # Direct child tabs of Root (depth 1) act as available parent sections
+                if (
+                    depth == 1
+                    and not title.lower().endswith("template")
+                    and not re.search(r"^session\s*\d+", title, re.IGNORECASE)
+                ):
+                    available_sections.append(title)
+
+                sess_match = re.search(r"^Session\s*(\d+)", title, re.IGNORECASE)
+                if sess_match:
+                    session_numbers.append(int(sess_match.group(1)))
+
+            # Discover templates regardless of depth
             if title.lower().endswith("template"):
-                type_key = title.lower().replace("template", "").strip()
-                headings = []
+                type_key = re.sub(r"\btemplate\b", "", title, flags=re.IGNORECASE).strip().lower()
+                fields = []
                 content = tab.get("documentTab", {}).get("body", {}).get("content", [])
+
                 for elem in content:
                     p = elem.get("paragraph")
-                    if p:
-                        text = "".join(e.get("textRun", {}).get("content", "") for e in p.get("elements", [])).strip()
-                        style = p.get("paragraphStyle", {}).get("namedStyleType", "")
-                        if text.startswith("#") or text.endswith(":") or "HEADING" in style:
-                            clean = text.lstrip("#").rstrip(":").strip()
-                            if clean and clean not in headings:
-                                headings.append(clean)
-                templates_dict[type_key] = headings
-            if "childTabs" in tab:
-                scan(tab["childTabs"])
+                    if not p:
+                        continue
+                    text = "".join(e.get("textRun", {}).get("content", "") for e in p.get("elements", [])).strip()
+                    if not text:
+                        continue
 
-    scan(doc.get("tabs", []))
-    return tabs_list, templates_dict
+                    label, instruction = parse_line_instruction(text)
+                    fields.append(
+                        {
+                            "raw_line": text,
+                            "label": label,
+                            "instruction": instruction,
+                            "requires_link": "link" in instruction.lower(),
+                        }
+                    )
+
+                templates_dict[type_key] = fields
+
+            if "childTabs" in tab:
+                scan(tab["childTabs"], parent_id=tab_id, depth=depth + 1)
+
+    scan(raw_tabs, parent_id=None, depth=0)
+    latest_session_num = max(session_numbers) if session_numbers else 1
+
+    return tabs_info, templates_dict, available_sections, root_tab_id, latest_session_num
+
+
+def get_latest_prompt(tabs_list, templates_dict, available_sections, latest_session_num, file_name):
+    with open(PROMPT_PATH, "r") as f:
+        prompt_text = f.read()
+
+    entity_types = [k for k in templates_dict.keys() if k != "session"]
+
+    prompt_text = prompt_text.replace("{tabs_list}", json.dumps(tabs_list, indent=2))
+    prompt_text = prompt_text.replace("{templates_dict}", json.dumps(templates_dict, indent=2))
+    prompt_text = prompt_text.replace("{entity_types}", json.dumps(entity_types))
+    prompt_text = prompt_text.replace("{available_sections}", json.dumps(available_sections))
+    prompt_text = prompt_text.replace("{latest_session_num}", str(latest_session_num))
+    prompt_text = prompt_text.replace("{file_name}", file_name)
+    return prompt_text
 
 
 def process_file(file_meta, campaign_name, doc_id, gemini_client, model_name):
@@ -114,26 +175,49 @@ def process_file(file_meta, campaign_name, doc_id, gemini_client, model_name):
         print(f"[{campaign_name}] Ingesting into Gemini...")
         audio_file = gemini_client.files.upload(file=local_path, config=types.UploadFileConfig(mime_type=mime_type))
 
-        tabs_list, templates_dict = inspect_doc(doc_id)
-        prompt = get_latest_prompt(tabs_list, templates_dict)
+        tabs_info, templates_dict, available_sections, root_tab_id, latest_session_num = inspect_doc(doc_id)
+        prompt = get_latest_prompt(
+            list(tabs_info.keys()), templates_dict, available_sections, latest_session_num, file_name
+        )
 
         print(f"[{campaign_name}] Gemini processing audio using {model_name}...")
-        response = gemini_client.models.generate_content(
-            model=model_name,
-            contents=[audio_file, prompt],
-            config=types.GenerateContentConfig(response_mime_type="application/json"),
-        )
+
+        max_retries = 3
+        backoff_seconds = 10
+        response = None
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = gemini_client.models.generate_content(
+                    model=model_name,
+                    contents=[audio_file, prompt],
+                    config=types.GenerateContentConfig(response_mime_type="application/json"),
+                )
+                break
+            except Exception as api_err:
+                err_str = str(api_err)
+                if (
+                    "503" in err_str or "UNAVAILABLE" in err_str or "RESOURCE_EXHAUSTED" in err_str
+                ) and attempt < max_retries:
+                    print(
+                        f"[{campaign_name}] Gemini API spike/busy (attempt {attempt}/{max_retries}). Retrying in {backoff_seconds}s..."
+                    )
+                    time.sleep(backoff_seconds)
+                    backoff_seconds *= 2
+                else:
+                    raise api_err
+
         extracted = json.loads(response.text)
 
-        # Dynamic doc_updater execution with hot-reload
         global doc_updater
         if doc_updater:
             doc_updater = importlib.reload(doc_updater)
-            doc_updater.apply_updates(docs_service, doc_id, extracted)
         else:
-            import doc_updater as fresh_doc_updater
+            import doc_updater
 
-            fresh_doc_updater.apply_updates(docs_service, doc_id, extracted)
+        doc_updater.apply_updates(
+            docs_service, doc_id, extracted, tabs_info, templates_dict, available_sections, root_tab_id
+        )
 
         drive_service.files().update(fileId=file_id, body={"name": f"[PROCESSED] {file_name}"}).execute()
         print(f"[{campaign_name}] Successfully processed {file_name}!")
@@ -153,13 +237,7 @@ def process_file(file_meta, campaign_name, doc_id, gemini_client, model_name):
 
 def discover_and_process():
     settings = load_settings()
-
-    if not settings["gemini_api_key"]:
-        print("GEMINI_API_KEY missing. Please provide it in the Unraid container settings.")
-        return
-
-    if not settings["campaign_folders"]:
-        print("CAMPAIGN_FOLDERS empty. Please provide Google Drive folder ID(s) in the Unraid container settings.")
+    if not settings["gemini_api_key"] or not settings["campaign_folders"]:
         return
 
     gemini_client = genai.Client(api_key=settings["gemini_api_key"])
@@ -192,12 +270,7 @@ def discover_and_process():
                 elif mime == "application/vnd.google-apps.folder" and name.strip().lower() == "recordings":
                     recordings_folder_id = item["id"]
 
-            if not doc_id:
-                print(f"[{campaign_name}] Skipped: No Google Doc named '{campaign_name}' found.")
-                continue
-
-            if not recordings_folder_id:
-                print(f"[{campaign_name}] Skipped: No 'Recordings' subfolder found.")
+            if not doc_id or not recordings_folder_id:
                 continue
 
             q_audio = f"'{recordings_folder_id}' in parents and trashed = false and not name contains '[PROCESSED]'"
@@ -222,6 +295,5 @@ if __name__ == "__main__":
             discover_and_process()
         except Exception as e:
             print(f"Watcher loop error: {e}")
-
-        current_settings = load_settings()
-        time.sleep(current_settings["check_interval_seconds"])
+        settings = load_settings()
+        time.sleep(settings["check_interval_seconds"])
