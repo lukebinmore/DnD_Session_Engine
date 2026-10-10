@@ -50,19 +50,73 @@ drive_service = build("drive", "v3", credentials=creds)
 docs_service = build("docs", "v1", credentials=creds)
 
 
-def parse_line_instruction(raw_text):
+def parse_template_instruction(raw_text):
     """
-    Parses a template line to isolate label/tags from bracketed instructions in ().
-    Preserves brackets [...] like [gk5] or [0j9].
-    Matches strictly at most one pair of () at the end of the line.
+    Parses a template line using grammar (Position: Format: Description) or (Don't Change).
+    Normalizes curly quotes to straight quotes.
+    Returns:
+      label: Text before the instruction, or empty if line is entirely (Replace: ...)
+      position: Replace, Inline, Block, Append, or None
+      format_type: PlainText, Paragraph, BulletList, Link, LinkList, or None
+      description: The instruction body for the AI
+      is_ignored: True if marked (Don't Change)
     """
-    clean_text = raw_text.strip()
+    clean_text = raw_text.replace("’", "'").strip()
     match = re.search(r"^(.*?)\s*\(([^()]+)\)\s*$", clean_text)
-    if match:
-        label = match.group(1).strip()
-        instruction = match.group(2).strip()
-        return label, instruction
-    return clean_text, ""
+    if not match:
+        return clean_text, None, None, "", False
+
+    label = match.group(1).strip()
+    instruction_inner = match.group(2).strip()
+
+    if instruction_inner.lower() in ["don't change", "dont change", "leave empty"]:
+        return label, None, None, "", True
+
+    parts = [p.strip() for p in instruction_inner.split(":", 2)]
+    if len(parts) == 3:
+        position, format_type, description = parts
+        return label, position, format_type, description, False
+    elif len(parts) == 2:
+        return label, parts[0], parts[1], "", False
+    else:
+        return label, None, None, instruction_inner, False
+
+
+def extract_elements_from_body(body_content):
+    """
+    Recursively extracts text elements from standard paragraphs and tables.
+    Returns a list of structured text lines.
+    """
+    lines = []
+    for elem in body_content:
+        p = elem.get("paragraph")
+        if p:
+            text = "".join(e.get("textRun", {}).get("content", "") for e in p.get("elements", [])).strip()
+            if text:
+                lines.append(text)
+        elif "table" in elem:
+            table = elem["table"]
+            for row in table.get("tableRows", []):
+                cells = row.get("tableCells", [])
+                cell_texts = []
+                for cell in cells:
+                    cell_str = "".join(
+                        "".join(
+                            e.get("textRun", {}).get("content", "") for e in cp.get("paragraph", {}).get("elements", [])
+                        )
+                        for cp in cell.get("content", [])
+                    ).strip()
+                    cell_texts.append(cell_str)
+
+                if len(cell_texts) >= 2 and cell_texts[0] and cell_texts[1]:
+                    lbl = cell_texts[0]
+                    instr = cell_texts[1]
+                    if not instr.startswith("("):
+                        instr = f"({instr})"
+                    lines.append(f"{lbl}: {instr}")
+                elif len(cell_texts) == 1 and cell_texts[0]:
+                    lines.append(cell_texts[0])
+    return lines
 
 
 def inspect_doc(doc_id):
@@ -71,7 +125,7 @@ def inspect_doc(doc_id):
       - root_tab_id: The top-level root tab (Depth 0)
       - available_sections: Direct child tabs inside Root (Depth 1)
       - tabs_info: Map of tab_title -> {tab_id, parent_tab_id, depth}
-      - templates_dict: Map of template_name -> field definitions
+      - templates_dict: Map of template_name -> parsed fields
       - latest_session_num: Highest session number found
     """
     doc = docs_service.documents().get(documentId=doc_id, includeTabsContent=True).execute()
@@ -94,7 +148,6 @@ def inspect_doc(doc_id):
             if title:
                 tabs_info[title] = {"tab_id": tab_id, "parent_tab_id": parent_id, "depth": depth}
 
-                # Direct child tabs of Root (depth 1) act as available parent sections
                 if (
                     depth == 1
                     and not title.lower().endswith("template")
@@ -106,27 +159,22 @@ def inspect_doc(doc_id):
                 if sess_match:
                     session_numbers.append(int(sess_match.group(1)))
 
-            # Discover templates regardless of depth
             if title.lower().endswith("template"):
                 type_key = re.sub(r"\btemplate\b", "", title, flags=re.IGNORECASE).strip().lower()
                 fields = []
                 content = tab.get("documentTab", {}).get("body", {}).get("content", [])
 
-                for elem in content:
-                    p = elem.get("paragraph")
-                    if not p:
-                        continue
-                    text = "".join(e.get("textRun", {}).get("content", "") for e in p.get("elements", [])).strip()
-                    if not text:
-                        continue
-
-                    label, instruction = parse_line_instruction(text)
+                raw_lines = extract_elements_from_body(content)
+                for text in raw_lines:
+                    label, pos, fmt, desc, is_ignored = parse_template_instruction(text)
                     fields.append(
                         {
                             "raw_line": text,
                             "label": label,
-                            "instruction": instruction,
-                            "requires_link": "link" in instruction.lower(),
+                            "position": pos,
+                            "format": fmt,
+                            "description": desc,
+                            "ignored": is_ignored,
                         }
                     )
 
@@ -145,10 +193,14 @@ def get_latest_prompt(tabs_list, templates_dict, available_sections, latest_sess
     with open(PROMPT_PATH, "r") as f:
         prompt_text = f.read()
 
+    clean_templates = {}
+    for tmpl_name, field_list in templates_dict.items():
+        clean_templates[tmpl_name] = [f for f in field_list if not f.get("ignored")]
+
     entity_types = [k for k in templates_dict.keys() if k != "session"]
 
     prompt_text = prompt_text.replace("{tabs_list}", json.dumps(tabs_list, indent=2))
-    prompt_text = prompt_text.replace("{templates_dict}", json.dumps(templates_dict, indent=2))
+    prompt_text = prompt_text.replace("{templates_dict}", json.dumps(clean_templates, indent=2))
     prompt_text = prompt_text.replace("{entity_types}", json.dumps(entity_types))
     prompt_text = prompt_text.replace("{available_sections}", json.dumps(available_sections))
     prompt_text = prompt_text.replace("{latest_session_num}", str(latest_session_num))
@@ -200,7 +252,7 @@ def process_file(file_meta, campaign_name, doc_id, gemini_client, model_name):
                     "503" in err_str or "UNAVAILABLE" in err_str or "RESOURCE_EXHAUSTED" in err_str
                 ) and attempt < max_retries:
                     print(
-                        f"[{campaign_name}] Gemini API spike/busy (attempt {attempt}/{max_retries}). Retrying in {backoff_seconds}s..."
+                        f"[{campaign_name}] Gemini API busy (attempt {attempt}/{max_retries}). Retrying in {backoff_seconds}s..."
                     )
                     time.sleep(backoff_seconds)
                     backoff_seconds *= 2
