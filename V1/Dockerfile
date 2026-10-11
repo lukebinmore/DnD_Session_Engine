@@ -1,19 +1,17 @@
 FROM python:3.11-slim
 
-WORKDIR /app
-
 ENV PYTHONUNBUFFERED=1
 
-# Install Google SDKs
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+WORKDIR /app
+RUN mkdir -p /defaults /app
 
-# Store fallback defaults inside the container image
-RUN mkdir /defaults
-COPY watcher.py doc_updater.py prompt.txt /defaults/
+# Dependencies
+COPY requirements.txt /defaults/requirements.txt
+RUN pip install --no-cache-dir -r /defaults/requirements.txt
 
-# Set up entrypoint script
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+# Copy application files into defaults
+COPY . /defaults/
 
-ENTRYPOINT ["/entrypoint.sh"]
+RUN chmod +x /defaults/entrypoint.sh
+
+ENTRYPOINT ["/defaults/entrypoint.sh"]
