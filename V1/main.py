@@ -2,9 +2,7 @@ import os
 import sys
 import time
 import logging
-import traceback
 import importlib
-from datetime import datetime
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from google import genai
@@ -34,6 +32,16 @@ raw_folders = os.environ.get("CAMPAIGN_FOLDERS", "")
 CAMPAIGN_FOLDERS = [f.strip() for f in raw_folders.split(",") if f.strip()]
 
 AUDIO_EXTENSIONS = (".m4a", ".mp3", ".wav", ".aac", ".ogg", ".flac")
+
+# Track all pipeline modules so any edits on disk reload automatically
+PIPELINE_MODULES = [
+    "inspector",
+    "truth_log",
+    "session_builder",
+    "entity_creator",
+    "entity_updater",
+    "tab_linker",
+]
 
 
 def verify_environment():
@@ -69,13 +77,11 @@ def init_services():
         return drive_service, docs_service, gemini_client
     except Exception as e:
         logger.critical(f"Failed to initialize API clients: {e}")
-        logger.debug(traceback.format_exc())
         sys.exit(1)
 
 
 def scan_campaign_folder(drive_service, docs_service, gemini_client, folder_id):
     """Scans a single campaign folder for the campaign Doc and any pending audio."""
-    logger.debug(f"Scanning folder ID: {folder_id}")
     try:
         folder_meta = drive_service.files().get(fileId=folder_id, fields="id, name, trashed").execute()
     except Exception as e:
@@ -117,7 +123,6 @@ def scan_campaign_folder(drive_service, docs_service, gemini_client, folder_id):
         logger.warning(f"[{campaign_name}] No subfolder named 'Recordings' found.")
         return
 
-    # Check for audio that isn't tagged as PROCESSED or FAILED
     query = (
         f"'{recordings_folder_id}' in parents "
         f"and trashed = false "
@@ -141,27 +146,32 @@ def scan_campaign_folder(drive_service, docs_service, gemini_client, folder_id):
             logger.info(f"[{campaign_name}] Passing control to pipeline.py...")
             logger.info("=" * 60)
 
-            try:
-                # Dynamic import and reload to allow hot updates to pipeline code
+            # Reload all pipeline stage modules so hot edits take effect immediately
+            for mod_name in PIPELINE_MODULES:
+                if mod_name in sys.modules:
+                    importlib.reload(sys.modules[mod_name])
+
+            # Reload pipeline orchestrator itself
+            if "pipeline" in sys.modules:
+                importlib.reload(sys.modules["pipeline"])
+            else:
                 import pipeline
 
-                importlib.reload(pipeline)
+            success = pipeline.run(
+                drive_service=drive_service,
+                docs_service=docs_service,
+                gemini_client=gemini_client,
+                campaign_name=campaign_name,
+                doc_id=doc_id,
+                audio_file_id=file_id,
+                audio_file_name=file_name,
+                model_name=GEMINI_MODEL,
+            )
 
-                pipeline.run(
-                    drive_service=drive_service,
-                    docs_service=docs_service,
-                    gemini_client=gemini_client,
-                    campaign_name=campaign_name,
-                    doc_id=doc_id,
-                    audio_file_id=file_id,
-                    audio_file_name=file_name,
-                    model_name=GEMINI_MODEL,
-                )
-                logger.info(f"[{campaign_name}] Pipeline execution finished for '{file_name}'.")
-
-            except Exception as e:
-                logger.error(f"[{campaign_name}] Uncaught exception while running pipeline on '{file_name}': {e}")
-                logger.error(traceback.format_exc())
+            if success:
+                logger.info(f"[{campaign_name}] Pipeline completed successfully for '{file_name}'.")
+            else:
+                logger.warning(f"[{campaign_name}] Pipeline execution failed for '{file_name}'.")
 
 
 def main():
@@ -185,7 +195,6 @@ def main():
                 )
         except Exception as loop_err:
             logger.error(f"Unexpected error during polling cycle: {loop_err}")
-            logger.debug(traceback.format_exc())
 
         time.sleep(CHECK_INTERVAL_SECONDS)
 
