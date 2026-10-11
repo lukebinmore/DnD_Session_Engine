@@ -29,11 +29,11 @@ def run(
         # =====================================================================
         # STAGE 1: Document Inspector
         # =====================================================================
-        logger.info(f"[{campaign_name}] [STAGE 1/6] Inspecting document structure & templates...")
+        logger.info(f"[{campaign_name}] [STAGE 1/6] Inspecting document structure &" " templates...")
         import inspector
 
         doc_meta = inspector.run(docs_service, doc_id)
-        logger.info(f"[{campaign_name}] [STAGE 1/6] Success: Parsed document metadata & tabs.")
+        logger.info(f"[{campaign_name}] [STAGE 1/6] Success: Parsed document metadata &" " tabs.")
 
         # =====================================================================
         # STAGE 2: Truth Log (Audio -> Narrative)
@@ -117,12 +117,12 @@ def run(
         logger.error(f"[{campaign_name}] Pipeline aborted due to error: {e}")
         logger.error(traceback.format_exc())
 
-        # Tag the file with [FAILED] so it won't loop continuously
+        # Tag the file with [FAILED] to prevent infinite retry loops
         try:
             failed_name = f"[FAILED] {audio_file_name}"
             logger.warning(f"[{campaign_name}] Renaming audio file to: '{failed_name}'")
             drive_service.files().update(fileId=audio_file_id, body={"name": failed_name}).execute()
         except Exception as rename_err:
-            logger.error(f"[{campaign_name}] Failed to rename file to [FAILED]: {rename_err}")
+            logger.error(f"[{campaign_name}] Failed to mark file as failed: {rename_err}")
 
         return False

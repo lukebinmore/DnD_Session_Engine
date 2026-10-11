@@ -33,7 +33,7 @@ CAMPAIGN_FOLDERS = [f.strip() for f in raw_folders.split(",") if f.strip()]
 
 AUDIO_EXTENSIONS = (".m4a", ".mp3", ".wav", ".aac", ".ogg", ".flac")
 
-# Track all pipeline modules so any edits on disk reload automatically
+# Track pipeline submodules so hot edits reload automatically
 PIPELINE_MODULES = [
     "inspector",
     "truth_log",
@@ -146,16 +146,15 @@ def scan_campaign_folder(drive_service, docs_service, gemini_client, folder_id):
             logger.info(f"[{campaign_name}] Passing control to pipeline.py...")
             logger.info("=" * 60)
 
-            # Reload all pipeline stage modules so hot edits take effect immediately
+            # Reload all registered stage modules if already in memory
             for mod_name in PIPELINE_MODULES:
                 if mod_name in sys.modules:
                     importlib.reload(sys.modules[mod_name])
 
-            # Reload pipeline orchestrator itself
-            if "pipeline" in sys.modules:
-                importlib.reload(sys.modules["pipeline"])
-            else:
-                import pipeline
+            # Unconditionally import and reload pipeline orchestrator
+            import pipeline
+
+            importlib.reload(pipeline)
 
             success = pipeline.run(
                 drive_service=drive_service,

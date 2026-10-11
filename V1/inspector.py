@@ -1,18 +1,14 @@
-import os
 import re
-import json
 import logging
 
 logger = logging.getLogger("Inspector")
 
-DEBUG_DUMP_PATH = "/app/inspector_debug.json" if os.path.exists("/app") else "./inspector_debug.json"
-
-# Naming patterns for template tabs
 TEMPLATE_PATTERNS = {
-    "session": re.compile(r"^(?:_)?(?:template[_-])?session(?:[_-]template)?$", re.IGNORECASE),
-    "npc": re.compile(r"^(?:_)?(?:template[_-])?npc(?:[_-]template)?$", re.IGNORECASE),
-    "location": re.compile(r"^(?:_)?(?:template[_-])?location(?:[_-]template)?$", re.IGNORECASE),
-    "faction": re.compile(r"^(?:_)?(?:template[_-])?faction(?:[_-]template)?$", re.IGNORECASE),
+    "session": re.compile(r"^(?:_)?(?:template[\s_-]*)?session(?:[\s_-]*template)?$", re.IGNORECASE),
+    "character": re.compile(r"^(?:_)?(?:template[\s_-]*)?(?:character|npc)(?:[\s_-]*template)?$", re.IGNORECASE),
+    "player": re.compile(r"^(?:_)?(?:template[\s_-]*)?player(?:[\s_-]*template)?$", re.IGNORECASE),
+    "location": re.compile(r"^(?:_)?(?:template[\s_-]*)?location(?:[\s_-]*template)?$", re.IGNORECASE),
+    "group": re.compile(r"^(?:_)?(?:template[\s_-]*)?(?:group|faction)(?:[\s_-]*template)?$", re.IGNORECASE),
 }
 
 SESSION_NAME_PATTERN = re.compile(r"^session\s+(\d+)", re.IGNORECASE)
@@ -33,29 +29,10 @@ def extract_plain_text(content_elements):
     return "".join(text_pieces)
 
 
-def save_debug_dump(data, filepath):
-    """Writes a clean summary dump of discovered tabs and templates."""
-    try:
-        clean_dump = {
-            "title": data.get("title"),
-            "doc_id": data.get("doc_id"),
-            "latest_session_num": data.get("latest_session_num"),
-            "next_session_num": data.get("next_session_num"),
-            "templates_found": list(data.get("templates", {}).keys()),
-            "tabs_info": data.get("tabs_info", {}),
-        }
-
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(clean_dump, f, indent=2, ensure_ascii=False)
-
-        logger.info(f"Debug JSON snapshot saved to: {filepath}")
-    except Exception as e:
-        logger.warning(f"Failed to write inspector debug file: {e}")
-
-
 def run(docs_service, doc_id):
     """
     Fetches and inspects the Google Doc hierarchy including all nested tabs.
+    Returns structured campaign metadata for downstream pipeline stages.
     """
     logger.info(f"Inspecting document structure (Doc ID: {doc_id})...")
 
@@ -66,7 +43,7 @@ def run(docs_service, doc_id):
 
     collected_tabs = []
 
-    def collect(node_list, parent_name=None):
+    def collect(node_list, parent_name=None, depth=0):
         for node in node_list:
             props = node.get("tabProperties", {})
             title = props.get("title", "Untitled").strip()
@@ -82,18 +59,19 @@ def run(docs_service, doc_id):
                     "title": title,
                     "tab_id": tab_id,
                     "parent": parent_name,
+                    "depth": depth,
+                    "text": text,
                     "text_length": len(text),
-                    "snippet": text[:200].strip() if text else "",
+                    "raw_content": content,
                 }
             )
 
-            # Check both locations where child tabs can be placed
             children_in_node = node.get("childTabs", [])
             children_in_props = props.get("childTabs", [])
             sub_tabs = children_in_node or children_in_props
 
             if sub_tabs:
-                collect(sub_tabs, parent_name=title)
+                collect(sub_tabs, parent_name=title, depth=depth + 1)
 
     collect(raw_tabs)
 
@@ -106,19 +84,22 @@ def run(docs_service, doc_id):
         tabs_info[title] = {
             "tab_id": item["tab_id"],
             "parent": item["parent"],
+            "depth": item["depth"],
             "text_length": item["text_length"],
-            "snippet": item["snippet"],
+            "full_text": item["text"].strip(),
         }
 
-        logger.info(f"-> Discovered: '{title}' (ID: {item['tab_id']}, Parent: {item['parent']})")
-
-        # Check for template tabs
+        # Match template tabs
         for tmpl_type, pattern in TEMPLATE_PATTERNS.items():
             if pattern.search(title):
-                templates[tmpl_type] = {"tab_id": item["tab_id"], "title": title, "parent": item["parent"]}
-                logger.info(f"   [MATCH] Template found: {tmpl_type.upper()} -> '{title}'")
+                templates[tmpl_type] = {
+                    "tab_id": item["tab_id"],
+                    "title": title,
+                    "parent": item["parent"],
+                    "content": item["raw_content"],
+                }
 
-        # Check for existing sessions
+        # Track session numbers
         session_match = SESSION_NAME_PATTERN.match(title)
         if session_match:
             try:
@@ -131,14 +112,20 @@ def run(docs_service, doc_id):
     latest_session_num = session_numbers[-1] if session_numbers else 0
     next_session_num = latest_session_num + 1
 
-    doc_metadata = {
+    # Concise operational log summary
+    tmpl_list = ", ".join(templates.keys()) if templates else "none"
+    logger.info(
+        f"Document '{doc_title}' parsed: {len(tabs_info)} tabs, "
+        f"templates found: [{tmpl_list}], "
+        f"sessions: {len(session_numbers)} (Next: Session {next_session_num})"
+    )
+
+    return {
         "title": doc_title,
         "doc_id": doc_id,
+        "all_session_numbers": session_numbers,
         "latest_session_num": latest_session_num,
         "next_session_num": next_session_num,
         "templates": templates,
         "tabs_info": tabs_info,
     }
-
-    save_debug_dump(doc_metadata, DEBUG_DUMP_PATH)
-    return doc_metadata
