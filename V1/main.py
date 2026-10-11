@@ -21,7 +21,7 @@ SERVICE_ACCOUNT_PATH = os.path.join(BASE_DIR, "service_account.json")
 
 # --- Environment Configuration ---
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip()
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3s.5-flash").strip()
 
 try:
     CHECK_INTERVAL_SECONDS = int(os.environ.get("CHECK_INTERVAL_SECONDS", "60"))
@@ -156,7 +156,7 @@ def scan_campaign_folder(drive_service, docs_service, gemini_client, folder_id):
 
             importlib.reload(pipeline)
 
-            success = pipeline.run(
+            pipeline.run(
                 drive_service=drive_service,
                 docs_service=docs_service,
                 gemini_client=gemini_client,
@@ -167,10 +167,7 @@ def scan_campaign_folder(drive_service, docs_service, gemini_client, folder_id):
                 model_name=GEMINI_MODEL,
             )
 
-            if success:
-                logger.info(f"[{campaign_name}] Pipeline completed successfully for '{file_name}'.")
-            else:
-                logger.warning(f"[{campaign_name}] Pipeline execution failed for '{file_name}'.")
+            logger.info(f"Watcher active. Polling campaign folders every {CHECK_INTERVAL_SECONDS} second(s)...")
 
 
 def main():
@@ -180,20 +177,16 @@ def main():
 
     verify_environment()
     drive_service, docs_service, gemini_client = init_services()
-
     logger.info(f"Watcher active. Polling campaign folders every {CHECK_INTERVAL_SECONDS} second(s)...")
 
     while True:
-        try:
-            for folder_id in CAMPAIGN_FOLDERS:
-                scan_campaign_folder(
-                    drive_service=drive_service,
-                    docs_service=docs_service,
-                    gemini_client=gemini_client,
-                    folder_id=folder_id,
-                )
-        except Exception as loop_err:
-            logger.error(f"Unexpected error during polling cycle: {loop_err}")
+        for folder_id in CAMPAIGN_FOLDERS:
+            scan_campaign_folder(
+                drive_service=drive_service,
+                docs_service=docs_service,
+                gemini_client=gemini_client,
+                folder_id=folder_id,
+            )
 
         time.sleep(CHECK_INTERVAL_SECONDS)
 

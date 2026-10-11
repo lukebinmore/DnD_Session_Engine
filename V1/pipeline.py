@@ -1,128 +1,106 @@
+import os
+import json
 import logging
-import traceback
+import importlib
+import inspector
+import truth_log
+
+# Force reload modules if running in a persistent daemon/watcher container
+importlib.reload(inspector)
+importlib.reload(truth_log)
 
 logger = logging.getLogger("Pipeline")
 
 
+def mark_file_failed(drive_service, audio_file_id, audio_file_name, campaign_name):
+    """Renames the audio file on Google Drive to prepend [FAILED]."""
+    try:
+        new_name = f"[FAILED] {audio_file_name}"
+        logger.warning(f"[{campaign_name}] Renaming audio file to: '{new_name}'")
+        drive_service.files().update(fileId=audio_file_id, body={"name": new_name}).execute()
+    except Exception as e:
+        logger.error(f"[{campaign_name}] Could not rename failed file in Drive: {e}")
+
+
+def mark_file_processed(drive_service, audio_file_id, audio_file_name, campaign_name):
+    """Renames the audio file on Google Drive to prepend [PROCESSED]."""
+    try:
+        new_name = f"[PROCESSED] {audio_file_name}"
+        logger.info(f"[{campaign_name}] Renaming audio file to: '{new_name}'")
+        drive_service.files().update(fileId=audio_file_id, body={"name": new_name}).execute()
+    except Exception as e:
+        logger.error(f"[{campaign_name}] Could not rename processed file in Drive: {e}")
+
+
 def run(
+    campaign_name,
     drive_service,
     docs_service,
     gemini_client,
-    campaign_name,
     doc_id,
     audio_file_id,
     audio_file_name,
-    model_name,
+    model_name=None,
 ):
-    """Core Pipeline Switchboard.
-
-    Executes modular steps sequentially for a detected audio file.
-    """
+    """Orchestrates the 6-stage D&D campaign documentation pipeline."""
     logger.info("------------------------------------------------------------")
     logger.info(f"[{campaign_name}] Pipeline started for: '{audio_file_name}'")
     logger.info("------------------------------------------------------------")
 
-    doc_meta = None
-    narrative_log = None
-
     try:
         # =====================================================================
-        # STAGE 1: Document Inspector
+        # STAGE 1: Inspection & Schema Parsing
         # =====================================================================
-        logger.info(f"[{campaign_name}] [STAGE 1/6] Inspecting document structure &" " templates...")
-        import inspector
-
-        doc_meta = inspector.run(docs_service, doc_id)
-        logger.info(f"[{campaign_name}] [STAGE 1/6] Success: Parsed document metadata &" " tabs.")
-
-        # =====================================================================
-        # STAGE 2: Truth Log (Audio -> Narrative)
-        # =====================================================================
-        # logger.info(f"[{campaign_name}] [STAGE 2/6] Generating chronological truth log via Gemini...")
-        # import truth_log
-        # known_tabs = list(doc_meta["tabs_info"].keys()) if doc_meta else []
-        # narrative_log = truth_log.run(
-        #     drive_service=drive_service,
-        #     gemini_client=gemini_client,
-        #     audio_file_id=audio_file_id,
-        #     audio_file_name=audio_file_name,
-        #     known_tabs=known_tabs,
-        #     model_name=model_name
-        # )
-        # logger.info(f"[{campaign_name}] [STAGE 2/6] Success: Truth log generated in memory.")
+        logger.info(f"[{campaign_name}] [STAGE 1/6] Inspecting document structure & templates...")
+        doc_meta = inspector.run(docs_service=docs_service, doc_id=doc_id)
+        known_tabs = doc_meta.get("all_tab_titles", [])
+        logger.info(f"[{campaign_name}] [STAGE 1/6] Success: Parsed document metadata & tabs.")
 
         # =====================================================================
-        # STAGE 3: Session Builder
+        # STAGE 2: Truth Log (Audio -> Objective Event Ledger)
         # =====================================================================
-        # logger.info(f"[{campaign_name}] [STAGE 3/6] Updating session tab & prepping next session...")
-        # import session_builder
-        # session_builder.run(
-        #     docs_service=docs_service,
-        #     gemini_client=gemini_client,
-        #     doc_id=doc_id,
-        #     narrative_log=narrative_log,
-        #     doc_meta=doc_meta,
-        #     model_name=model_name
-        # )
-        # logger.info(f"[{campaign_name}] [STAGE 3/6] Success: Session tabs updated.")
+        logger.info(f"[{campaign_name}] [STAGE 2/6] Generating chronological truth log via Gemini...")
+        narrative_log = truth_log.run(
+            drive_service=drive_service,
+            gemini_client=gemini_client,
+            audio_file_id=audio_file_id,
+            audio_file_name=audio_file_name,
+            known_tabs=known_tabs,
+            model_name=model_name,
+            cache_dir="/app/truth_logs",
+        )
+        logger.info(
+            f"[{campaign_name}] [STAGE 2/6] Success: Truth log generated ({len(narrative_log.splitlines())} events)."
+        )
 
         # =====================================================================
-        # STAGE 4: Entity Creator
+        # STAGE 3: Session Tab Creation & Ingestion
         # =====================================================================
-        # logger.info(f"[{campaign_name}] [STAGE 4/6] Detecting & generating new entity tabs...")
-        # import entity_creator
-        # entity_creator.run(
-        #     docs_service=docs_service,
-        #     gemini_client=gemini_client,
-        #     doc_id=doc_id,
-        #     narrative_log=narrative_log,
-        #     doc_meta=doc_meta,
-        #     model_name=model_name
-        # )
-        # logger.info(f"[{campaign_name}] [STAGE 4/6] Success: New entity tabs created.")
+        # logger.info(f"[{campaign_name}] [STAGE 3/6] Pending: Session Tab creation & ingestion...")
 
         # =====================================================================
-        # STAGE 5: Entity Updater
+        # STAGE 4: Entity Reconciliation & Ledger (Delta Extraction)
         # =====================================================================
-        # logger.info(f"[{campaign_name}] [STAGE 5/6] Appending delta updates to existing entities...")
-        # import entity_updater
-        # entity_updater.run(
-        #     docs_service=docs_service,
-        #     gemini_client=gemini_client,
-        #     doc_id=doc_id,
-        #     narrative_log=narrative_log,
-        #     doc_meta=doc_meta,
-        #     model_name=model_name
-        # )
-        # logger.info(f"[{campaign_name}] [STAGE 5/6] Success: Existing entities updated.")
+        # logger.info(f"[{campaign_name}] [STAGE 4/6] Pending: Entity reconciliation...")
 
         # =====================================================================
-        # STAGE 6: Tab Linker
+        # STAGE 5: Document Mutation & Tab Updates
         # =====================================================================
-        # logger.info(f"[{campaign_name}] [STAGE 6/6] Scanning document to link tab references...")
-        # import tab_linker
-        # tab_linker.run(docs_service, doc_id)
-        # logger.info(f"[{campaign_name}] [STAGE 6/6] Success: Internal tab links inserted.")
+        # logger.info(f"[{campaign_name}] [STAGE 5/6] Pending: Applying batch updates to Google Doc...")
 
         # =====================================================================
-        # FINALIZATION: Mark Audio as Processed
+        # STAGE 6: Hyperlinking & Formatting Cleanup
         # =====================================================================
-        processed_name = f"[PROCESSED] {audio_file_name}"
-        logger.info(f"[{campaign_name}] All active stages finished. Renaming audio file to:" f" '{processed_name}'")
-        drive_service.files().update(fileId=audio_file_id, body={"name": processed_name}).execute()
-        logger.info(f"[{campaign_name}] File successfully marked as processed.")
+        # logger.info(f"[{campaign_name}] [STAGE 6/6] Pending: Internal hyperlinking...")
+
+        mark_file_processed(drive_service, audio_file_id, audio_file_name, campaign_name)
+
+        logger.info("------------------------------------------------------------")
+        logger.info(f"[{campaign_name}] Pipeline completed successfully for '{audio_file_name}'.")
+        logger.info("------------------------------------------------------------")
         return True
 
     except Exception as e:
-        logger.error(f"[{campaign_name}] Pipeline aborted due to error: {e}")
-        logger.error(traceback.format_exc())
-
-        # Tag the file with [FAILED] to prevent infinite retry loops
-        try:
-            failed_name = f"[FAILED] {audio_file_name}"
-            logger.warning(f"[{campaign_name}] Renaming audio file to: '{failed_name}'")
-            drive_service.files().update(fileId=audio_file_id, body={"name": failed_name}).execute()
-        except Exception as rename_err:
-            logger.error(f"[{campaign_name}] Failed to mark file as failed: {rename_err}")
-
+        logger.error(f"[{campaign_name}] Pipeline aborted due to error: {e}", exc_info=True)
+        mark_file_failed(drive_service, audio_file_id, audio_file_name, campaign_name)
         return False
