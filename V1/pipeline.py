@@ -4,10 +4,12 @@ import logging
 import importlib
 import inspector
 import truth_log
+import session_creator
 
 # Force reload modules if running in a persistent daemon/watcher container
 importlib.reload(inspector)
 importlib.reload(truth_log)
+importlib.reload(session_creator)
 
 logger = logging.getLogger("Pipeline")
 
@@ -40,7 +42,7 @@ def run(
     doc_id,
     audio_file_id,
     audio_file_name,
-    model_name=None,
+    **kwargs,
 ):
     """Orchestrates the 6-stage D&D campaign documentation pipeline."""
     logger.info("------------------------------------------------------------")
@@ -60,23 +62,32 @@ def run(
         # STAGE 2: Truth Log (Audio -> Objective Event Ledger)
         # =====================================================================
         logger.info(f"[{campaign_name}] [STAGE 2/6] Generating chronological truth log via Gemini...")
-        narrative_log = truth_log.run(
+        truth_log_text = truth_log.run(
             drive_service=drive_service,
             gemini_client=gemini_client,
             audio_file_id=audio_file_id,
             audio_file_name=audio_file_name,
             known_tabs=known_tabs,
-            model_name=model_name,
             cache_dir="/app/truth_logs",
         )
         logger.info(
-            f"[{campaign_name}] [STAGE 2/6] Success: Truth log generated ({len(narrative_log.splitlines())} events)."
+            f"[{campaign_name}] [STAGE 2/6] Success: Truth log generated ({len(truth_log_text.splitlines())} events)."
         )
 
         # =====================================================================
         # STAGE 3: Session Tab Creation & Ingestion
         # =====================================================================
-        # logger.info(f"[{campaign_name}] [STAGE 3/6] Pending: Session Tab creation & ingestion...")
+        logger.info(f"[{campaign_name}] [STAGE 3/6] Starting Session Tab Creation & Ingestion...")
+        session_result = session_creator.run(
+            docs_service=docs_service,
+            gemini_client=gemini_client,
+            doc_id=doc_id,
+            doc_meta=doc_meta,
+            truth_log=truth_log_text,
+        )
+        logger.info(
+            f"[{campaign_name}] [STAGE 3/6] Success: Tab '{session_result['tab_title']}' created and populated."
+        )
 
         # =====================================================================
         # STAGE 4: Entity Reconciliation & Ledger (Delta Extraction)

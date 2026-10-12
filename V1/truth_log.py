@@ -4,8 +4,8 @@ import time
 import logging
 import io
 import mimetypes
+import gemini_helper
 from googleapiclient.http import MediaIoBaseDownload
-from google.genai.errors import ServerError, APIError
 
 logger = logging.getLogger("TruthLog")
 
@@ -18,11 +18,6 @@ AUDIO_MIME_MAP = {
     ".ogg": "audio/ogg",
     ".flac": "audio/flac",
 }
-
-# Preferred model ladder for multimodal audio tasks
-MODEL_CANDIDATE_ORDER = [
-    "gemini-3.1-pro-preview",
-]
 
 
 def get_audio_mime_type(filename):
@@ -68,78 +63,12 @@ def download_audio_from_drive(drive_service, file_id, dest_path):
     logger.info(f"Audio downloaded to: {dest_path}")
 
 
-def generate_with_dynamic_fallback(
-    gemini_client,
-    preferred_model,
-    contents,
-    config,
-    max_retries_per_model=3,
-    initial_delay=8,
-):
-    """
-    Attempts generation with preferred model using exponential backoff.
-    If it hits 503 capacity spikes, 429 rate limits, or 404 deprecations,
-    cascades through the candidate model ladder until generation succeeds.
-    """
-    # 1. Build prioritized list of models
-    candidates = []
-    if preferred_model:
-        candidates.append(preferred_model)
-    for model in MODEL_CANDIDATE_ORDER:
-        if model not in candidates:
-            candidates.append(model)
-
-    last_error = None
-
-    # 2. Outer loop: Iterate through models in the ladder
-    for model in candidates:
-        logger.info(f"Attempting audio generation with model: '{model}'...")
-        delay = initial_delay
-
-        # 3. Inner loop: Retries for the current model
-        for attempt in range(1, max_retries_per_model + 1):
-            try:
-                response = gemini_client.models.generate_content(
-                    model=model,
-                    contents=contents,
-                    config=config,
-                )
-                logger.info(f"Successfully generated Truth Log using model: '{model}'")
-                return response
-
-            except (ServerError, APIError) as e:
-                err_str = str(e)
-                last_error = e
-
-                # Check if this is a transient server spike or rate limit
-                is_transient = any(code in err_str for code in ["503", "UNAVAILABLE", "429"])
-
-                if is_transient and attempt < max_retries_per_model:
-                    logger.warning(
-                        f"Model '{model}' busy (attempt {attempt}/{max_retries_per_model}). " f"Retrying in {delay}s..."
-                    )
-                    time.sleep(delay)
-                    delay *= 2  # Exponential backoff (8s -> 16s -> ...)
-                elif is_transient:
-                    logger.warning(
-                        f"Exhausted all {max_retries_per_model} retries on '{model}' due to demand. "
-                        f"Switching to next candidate model..."
-                    )
-                else:
-                    # Non-transient error (404 deprecated, 400 bad request) -> skip immediately
-                    logger.warning(f"Skipping model '{model}' due to non-transient error: {err_str}")
-                    break
-
-    raise RuntimeError(f"All model candidates failed generation. Last error: {last_error}")
-
-
 def run(
     drive_service,
     gemini_client,
     audio_file_id,
     audio_file_name,
     known_tabs=None,
-    model_name=None,
     cache_dir="/app/truth_logs",
     **kwargs,
 ):
@@ -148,7 +77,6 @@ def run(
     Uses model from environment variable/caller, falling back dynamically if busy.
     """
     known_tabs = known_tabs or []
-    preferred_model = model_name
 
     # 1. Local Cache Check: Skip download and API call if already processed
     os.makedirs(cache_dir, exist_ok=True)
@@ -199,9 +127,8 @@ Known Campaign Entities (use exact spelling where applicable):
 Capture initial vocal characterizations under [Voice: ...] rules, ignoring subsequent accent drops."""
 
         # 6. Execute generation with dynamic retry and fallback
-        response = generate_with_dynamic_fallback(
+        response = gemini_helper.generate_with_fallback(
             gemini_client=gemini_client,
-            preferred_model=preferred_model,
             contents=[gemini_file, user_prompt],
             config={
                 "system_instruction": TRUTH_LOG_SYSTEM_PROMPT,

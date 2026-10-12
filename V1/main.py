@@ -5,6 +5,7 @@ import logging
 import importlib
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from google import genai
 
 # Unbuffer stdout so log events hit the Unraid web terminal immediately
@@ -12,7 +13,10 @@ sys.stdout.reconfigure(line_buffering=True)
 
 # Configure logging format with timestamps and severity levels
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S", stream=sys.stdout
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    stream=sys.stdout,
 )
 logger = logging.getLogger("Watcher")
 
@@ -21,7 +25,7 @@ SERVICE_ACCOUNT_PATH = os.path.join(BASE_DIR, "service_account.json")
 
 # --- Environment Configuration ---
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3s.5-flash").strip()
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "").strip()
 
 try:
     CHECK_INTERVAL_SECONDS = int(os.environ.get("CHECK_INTERVAL_SECONDS", "60"))
@@ -35,13 +39,52 @@ AUDIO_EXTENSIONS = (".m4a", ".mp3", ".wav", ".aac", ".ogg", ".flac")
 
 # Track pipeline submodules so hot edits reload automatically
 PIPELINE_MODULES = [
+    "gemini_helper",
+    "docs_helper",
     "inspector",
     "truth_log",
-    "session_builder",
+    "session_creator",
     "entity_creator",
     "entity_updater",
     "tab_linker",
 ]
+
+
+def execute_drive_call_with_retry(request, max_retries=3, initial_delay=2):
+    """
+    Executes a Google Drive API request with exponential backoff on transient errors (5xx).
+    Returns the executed response or raises if retries are exhausted.
+    """
+    delay = initial_delay
+    last_exception = None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            return request.execute()
+        except HttpError as e:
+            last_exception = e
+            status = getattr(e.resp, "status", None)
+            if status in (500, 502, 503, 504) and attempt < max_retries:
+                logger.warning(
+                    f"Google Drive API temporary error ({status}). Retrying in {delay}s (attempt {attempt}/{max_retries})..."
+                )
+                time.sleep(delay)
+                delay *= 2
+            else:
+                raise
+        except Exception as e:
+            # Network hiccups/timeouts
+            last_exception = e
+            if attempt < max_retries:
+                logger.warning(
+                    f"Drive request network failure: {e}. Retrying in {delay}s (attempt {attempt}/{max_retries})..."
+                )
+                time.sleep(delay)
+                delay *= 2
+            else:
+                raise
+
+    raise last_exception
 
 
 def verify_environment():
@@ -53,10 +96,15 @@ def verify_environment():
         sys.exit(1)
     logger.info(f"Service account file confirmed at: {SERVICE_ACCOUNT_PATH}")
 
+    if not GEMINI_MODEL:
+        logger.critical("GEMINI_MODEL environemtn variable is missing.")
+        sys.exit(1)
+    logger.info(f"Gemini Model detected. Configured model: {GEMINI_MODEL}")
+
     if not GEMINI_API_KEY:
         logger.critical("GEMINI_API_KEY environment variable is missing.")
         sys.exit(1)
-    logger.info(f"Gemini API key detected. Configured model: {GEMINI_MODEL}")
+    logger.info("Gemini API key detected.")
 
     if not CAMPAIGN_FOLDERS:
         logger.warning("CAMPAIGN_FOLDERS is empty. The watcher will idle until folders are specified.")
@@ -68,7 +116,10 @@ def init_services():
     """Initializes Google Drive, Google Docs, and Gemini API clients."""
     logger.info("Initializing API connections (Google Drive, Google Docs, Gemini)...")
     try:
-        scopes = ["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/documents"]
+        scopes = [
+            "https://www.googleapis.com/auth/drive",
+            "https://www.googleapis.com/auth/documents",
+        ]
         creds = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_PATH, scopes=scopes)
         drive_service = build("drive", "v3", credentials=creds)
         docs_service = build("docs", "v1", credentials=creds)
@@ -82,25 +133,33 @@ def init_services():
 
 def scan_campaign_folder(drive_service, docs_service, gemini_client, folder_id):
     """Scans a single campaign folder for the campaign Doc and any pending audio."""
+    # 1. Fetch Folder Metadata with retry
     try:
-        folder_meta = drive_service.files().get(fileId=folder_id, fields="id, name, trashed").execute()
+        req = drive_service.files().get(
+            fileId=folder_id,
+            fields="id, name, trashed",
+            supportsAllDrives=True,
+        )
+        folder_meta = execute_drive_call_with_retry(req)
     except Exception as e:
-        logger.error(f"Failed to access folder ID {folder_id}: {e}")
+        logger.error(f"Failed to access campaign folder: {e}")
         return
 
     if folder_meta.get("trashed"):
-        logger.warning(f"Folder '{folder_meta.get('name')}' ({folder_id}) is in the trash. Skipping.")
+        logger.warning(f"Campaign folder '{folder_meta.get('name')}' is in the trash. Skipping.")
         return
 
     campaign_name = folder_meta.get("name")
 
+    # 2. List items in campaign folder with retry
     try:
-        children = (
-            drive_service.files()
-            .list(q=f"'{folder_id}' in parents and trashed = false", fields="files(id, name, mimeType)")
-            .execute()
-            .get("files", [])
+        req = drive_service.files().list(
+            q=f"'{folder_id}' in parents and trashed = false",
+            fields="files(id, name, mimeType)",
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
         )
+        children = execute_drive_call_with_retry(req).get("files", [])
     except Exception as e:
         logger.error(f"[{campaign_name}] Error listing children in folder: {e}")
         return
@@ -123,6 +182,7 @@ def scan_campaign_folder(drive_service, docs_service, gemini_client, folder_id):
         logger.warning(f"[{campaign_name}] No subfolder named 'Recordings' found.")
         return
 
+    # 3. List audio files with retry
     query = (
         f"'{recordings_folder_id}' in parents "
         f"and trashed = false "
@@ -130,7 +190,13 @@ def scan_campaign_folder(drive_service, docs_service, gemini_client, folder_id):
         f"and not name contains '[FAILED]'"
     )
     try:
-        audio_files = drive_service.files().list(q=query, fields="files(id, name, mimeType)").execute().get("files", [])
+        req = drive_service.files().list(
+            q=query,
+            fields="files(id, name, mimeType)",
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+        )
+        audio_files = execute_drive_call_with_retry(req).get("files", [])
     except Exception as e:
         logger.error(f"[{campaign_name}] Error scanning 'Recordings' folder: {e}")
         return
@@ -142,7 +208,7 @@ def scan_campaign_folder(drive_service, docs_service, gemini_client, folder_id):
             file_name = audio_file["name"]
 
             logger.info("=" * 60)
-            logger.info(f"[{campaign_name}] NEW AUDIO DETECTED: '{file_name}' (ID: {file_id})")
+            logger.info(f"[{campaign_name}] NEW AUDIO DETECTED: '{file_name}'")
             logger.info(f"[{campaign_name}] Passing control to pipeline.py...")
             logger.info("=" * 60)
 
@@ -164,7 +230,6 @@ def scan_campaign_folder(drive_service, docs_service, gemini_client, folder_id):
                 doc_id=doc_id,
                 audio_file_id=file_id,
                 audio_file_name=file_name,
-                model_name=GEMINI_MODEL,
             )
 
             logger.info(f"Watcher active. Polling campaign folders every {CHECK_INTERVAL_SECONDS} second(s)...")
@@ -180,13 +245,16 @@ def main():
     logger.info(f"Watcher active. Polling campaign folders every {CHECK_INTERVAL_SECONDS} second(s)...")
 
     while True:
-        for folder_id in CAMPAIGN_FOLDERS:
-            scan_campaign_folder(
-                drive_service=drive_service,
-                docs_service=docs_service,
-                gemini_client=gemini_client,
-                folder_id=folder_id,
-            )
+        try:
+            for folder_id in CAMPAIGN_FOLDERS:
+                scan_campaign_folder(
+                    drive_service=drive_service,
+                    docs_service=docs_service,
+                    gemini_client=gemini_client,
+                    folder_id=folder_id,
+                )
+        except Exception as e:
+            logger.error(f"Unexpected error in polling loop: {e}")
 
         time.sleep(CHECK_INTERVAL_SECONDS)
 
