@@ -254,6 +254,7 @@ def run(docs_service, doc_id):
             body = doc_tab.get("body", {})
             content = body.get("content", [])
             text = extract_plain_text(content)
+            end_index = content[-1].get("endIndex", 1) if content else 1
 
             flat_tabs.append(
                 {
@@ -263,6 +264,7 @@ def run(docs_service, doc_id):
                     "depth": depth,
                     "text": text,
                     "content": content,
+                    "end_index": end_index,
                 }
             )
 
@@ -339,6 +341,7 @@ def run(docs_service, doc_id):
                     "full_text": tab["text"].strip(),
                     "sections": item_sections,
                     "sections_by_key": sections_by_key,
+                    "end_index": tab["end_index"],
                 }
 
                 sm = SESSION_NAME_PATTERN.match(title)
@@ -357,6 +360,7 @@ def run(docs_service, doc_id):
                     "header_summary": "\n".join(header_lines) if header_lines else "",
                     "full_text": tab["text"].strip(),
                     "sections": item_sections,
+                    "end_index": tab["end_index"],
                 }
         else:
             # Check if this tab is a category folder header itself
@@ -368,6 +372,7 @@ def run(docs_service, doc_id):
                     "parent": parent,
                     "depth": tab["depth"],
                     "full_text": tab["text"].strip(),
+                    "end_index": tab["end_index"],
                 }
 
     # 5. Session numbering calculation

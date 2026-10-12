@@ -5,7 +5,7 @@ from google.genai.errors import ServerError, APIError
 
 logger = logging.getLogger("GeminiHelper")
 
-MODEL_CANDIDATE_ORDER = ["gemini-3.1-pro-preview", "gemini-3.8-flash"]
+MODEL_CANDIDATE_ORDER = ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash"]
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "").strip()
 
 
