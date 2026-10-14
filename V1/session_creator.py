@@ -57,14 +57,31 @@ CURRENT SESSION TRUTH LOG (Active Session):
     return data
 
 
+def get_sections_map(sections_list: list) -> dict:
+    """Indexes a tab's section list by lowercase heading title for quick lookup."""
+    sec_map = {}
+    for s in sections_list:
+        heading_key = s.get("heading", "").strip().lower()
+        sec_map[heading_key] = s.get("content", "")
+    return sec_map
+
+
 def build_current_session_payload(doc_meta, current_num, session_data):
     """Extracts preserved prep from Session N (including any manual date/subtitle),
-
     and combines it with fresh retrospective notes and title.
     """
     tab_title = f"Session {current_num}"
-    sessions_coll = doc_meta.get("collections", {}).get("sessions", {})
+    sessions_coll = doc_meta.get("sessions", {})
+
     existing_item = sessions_coll.get("items", {}).get(tab_title, {})
+    if not existing_item:
+        for title_key, item in sessions_coll.get("items", {}).items():
+            if title_key.startswith(f"Session {current_num}"):
+                existing_item = item
+                break
+
+    if not existing_item:
+        raise ValueError(f"Cannot close out '{tab_title}': tab not found in doc_meta['sessions']['items'].")
 
     tab_id = existing_item.get("tab_id")
     end_index = existing_item.get("end_index", 1)
@@ -73,11 +90,11 @@ def build_current_session_payload(doc_meta, current_num, session_data):
         raise ValueError(f"Cannot close out '{tab_title}': tabId not found in doc_meta.")
 
     # 1. Pull preserved prep fields
-    existing_sections = existing_item.get("sections_by_key", {})
-    preserved_date = existing_sections.get("date", "")
-    preserved_ai_ideas = existing_sections.get("ai ideas for session", [])
-    preserved_plot = existing_sections.get("general plot for session", "")
-    preserved_recap = existing_sections.get("previous notes summary", "")
+    sections_map = get_sections_map(existing_item.get("sections", []))
+    preserved_date = sections_map.get("date", "")
+    preserved_ai_ideas = sections_map.get("ai ideas for session", [])
+    preserved_plot = sections_map.get("general plot for session", "")
+    preserved_recap = sections_map.get("previous notes summary", "")
 
     if isinstance(preserved_ai_ideas, str) and preserved_ai_ideas:
         preserved_ai_ideas = [line.strip("- ").strip() for line in preserved_ai_ideas.split("\n") if line.strip()]
@@ -89,13 +106,13 @@ def build_current_session_payload(doc_meta, current_num, session_data):
     # 3. Assemble sections with TITLE, preserved SUBTITLE, and HEADING_1
     sections = [
         {
-            "heading": full_title,
+            "heading": "TITLE",
             "style": "TITLE",
             "type": "paragraph",
-            "content": "",
+            "content": full_title,
         },
         {
-            "heading": "Date:",
+            "heading": "Date",
             "style": "HEADING_1",
             "type": "paragraph",
             "content": preserved_date,
@@ -137,8 +154,7 @@ def build_current_session_payload(doc_meta, current_num, session_data):
 
 def build_next_session_payload(next_num, session_data):
     """Builds the prep payload for Session N+1 with a simple title,
-
-    an empty SUBTITLE slot ready for your manual date entry,
+    an empty slot ready for your manual date entry,
     fresh prep ideas, blank plot, and fresh recap.
     """
     new_tab_id = f"t.session_{next_num}_{uuid.uuid4().hex[:6]}"
@@ -146,13 +162,13 @@ def build_next_session_payload(next_num, session_data):
 
     sections = [
         {
-            "heading": tab_title,
+            "heading": "TITLE",
             "style": "TITLE",
             "type": "paragraph",
-            "content": "",
+            "content": tab_title,
         },
         {
-            "heading": "Date:",
+            "heading": "Date",
             "style": "HEADING_1",
             "type": "paragraph",
             "content": "",
@@ -186,21 +202,27 @@ def run(gemini_client, truth_log, doc_meta, docs_service=None, doc_id=None, **kw
     2. Spawns Session N+1 under the Sessions folder tab.
     3. Populates prep sections in Session N+1.
     """
+    sessions_node = doc_meta.get("sessions", {})
+
     # 1. Determine active and upcoming session numbers
-    sessions_meta = doc_meta.get("sessions_meta", {})
-    current_num = sessions_meta.get("latest_session_num", 1)
-    next_num = current_num + 1
+    current_num = doc_meta.get("sessions_meta", {}).get("latest_session_num", 1)
+    next_num = doc_meta.get("sessions_meta", {}).get("next_session_num", 2)
 
     # 2. Extract recap/summary context from the current session tab
-    current_tab_title = f"Session {current_num}"
-    sessions_coll = doc_meta.get("collections", {}).get("sessions", {})
-    current_session = sessions_coll.get("items", {}).get(current_tab_title, {})
-    sections_by_key = current_session.get("sections_by_key", {})
+    tab_title = f"Session {current_num}"
+    current_session = sessions_node.get("items", {}).get(tab_title)
 
-    current_summary_context = (
-        sections_by_key.get("previous notes summary") or sections_by_key.get("session notes") or ""
-    )
-    logger.info(f"Loaded prior context from '{current_tab_title}'" f" ({len(current_summary_context)} chars).")
+    if not current_session:
+        for k, v in sessions_node.get("items", {}).items():
+            if k.startswith(f"Session {current_num}"):
+                current_session = v
+                break
+
+    sections_map = get_sections_map(current_session.get("sections", [])) if current_session else {}
+
+    current_summary_context = sections_map.get("previous notes summary") or sections_map.get("session notes") or ""
+    if isinstance(current_summary_context, list):
+        current_summary_context = "\n".join(f"- {item}" for item in current_summary_context)
 
     # 3. Synthesize fresh session content via Gemini
     session_data = synthesize_session_content(
@@ -240,7 +262,7 @@ def run(gemini_client, truth_log, doc_meta, docs_service=None, doc_id=None, **kw
     )
 
     # 2. Add Session N+1 tab under parent folder
-    parent_tab_id = sessions_coll.get("folder_tab_id")
+    parent_tab_id = sessions_node.get("tab_id")
     batch1_requests.append(
         docs_helper.build_add_tab_request(
             title=next_tab_title,
@@ -249,7 +271,6 @@ def run(gemini_client, truth_log, doc_meta, docs_service=None, doc_id=None, **kw
     )
 
     if docs_service and doc_id:
-        logger.info(f"Executing Batch 1: updating '{current_tab_title}' and creating" f" tab '{next_tab_title}'...")
         response1 = docs_helper.execute_batch(
             docs_service=docs_service,
             doc_id=doc_id,
@@ -273,27 +294,23 @@ def run(gemini_client, truth_log, doc_meta, docs_service=None, doc_id=None, **kw
                 f"Full reply: {add_tab_reply}"
             )
 
-        logger.info(f"Created tab '{next_tab_title}' with server tabId: {new_server_tab_id}")
-
         # --- BATCH 2: Populate Session N+1 Content ---
         batch2_requests = docs_helper.build_tab_content_requests(
             tab_id=new_server_tab_id,
             sections=next_sections,
         )
 
-        logger.info(f"Executing Batch 2: populating prep content for" f" '{next_tab_title}'...")
         docs_helper.execute_batch(
             docs_service=docs_service,
             doc_id=doc_id,
             requests=batch2_requests,
         )
-        logger.info(f"Successfully updated '{current_tab_title}' and populated" f" '{next_tab_title}'.")
     else:
         logger.warning("docs_service or doc_id missing; skipped Google Docs update.")
 
     # Placed at the very end of session_creator.run():
     return {
-        "tab_title": f"{current_tab_title} & {next_tab_title}",
+        "tab_title": f"{tab_title} & {next_tab_title}",
         "current_session_num": current_num,
         "next_session_num": next_num,
         "data": session_data,

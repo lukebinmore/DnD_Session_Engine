@@ -39,6 +39,7 @@ AUDIO_EXTENSIONS = (".m4a", ".mp3", ".wav", ".aac", ".ogg", ".flac")
 
 # Track pipeline submodules so hot edits reload automatically
 PIPELINE_MODULES = [
+    "file_helper",
     "gemini_helper",
     "docs_helper",
     "inspector",

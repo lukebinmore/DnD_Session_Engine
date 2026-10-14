@@ -51,16 +51,12 @@ Rules:
 
 def download_audio_from_drive(drive_service, file_id, dest_path):
     """Streams the audio file from Google Drive to a local temporary file."""
-    logger.info(f"Downloading audio file from Google Drive (ID: {file_id})...")
     request = drive_service.files().get_media(fileId=file_id)
     with io.FileIO(dest_path, "wb") as fh:
         downloader = MediaIoBaseDownload(fh, request, chunksize=1024 * 1024 * 10)
         done = False
         while not done:
             status, done = downloader.next_chunk()
-            if status:
-                logger.info(f"Download progress: {int(status.progress() * 100)}%")
-    logger.info(f"Audio downloaded to: {dest_path}")
 
 
 def run(
@@ -82,7 +78,6 @@ def run(
     os.makedirs(cache_dir, exist_ok=True)
     cache_file = os.path.join(cache_dir, f"{os.path.splitext(audio_file_name)[0]}_truth.txt")
     if os.path.exists(cache_file):
-        logger.info(f"Loading cached Truth Log from {cache_file}")
         with open(cache_file, "r", encoding="utf-8") as f:
             return f.read().strip()
 
@@ -108,14 +103,11 @@ def run(
 
         # 4. Poll until the Gemini servers finish processing the file
         while gemini_file.state.name == "PROCESSING":
-            logger.info("Audio is processing on Gemini servers, waiting 10s...")
             time.sleep(10)
             gemini_file = gemini_client.files.get(name=gemini_file.name)
 
         if gemini_file.state.name != "ACTIVE":
             raise RuntimeError(f"Audio file upload failed with state: {gemini_file.state.name}")
-
-        logger.info("Audio ready for multimodal generation.")
 
         # 5. Build dynamic prompt with known tab entities from Stage 1
         known_entities_str = ", ".join(known_tabs) if known_tabs else "None provided yet."
@@ -141,7 +133,6 @@ Capture initial vocal characterizations under [Voice: ...] rules, ignoring subse
         # 7. Write to cache file on disk
         with open(cache_file, "w", encoding="utf-8") as f:
             f.write(truth_log_text)
-        logger.info(f"Truth Log written to {cache_file}")
 
         return truth_log_text
 
@@ -157,6 +148,5 @@ Capture initial vocal characterizations under [Voice: ...] rules, ignoring subse
         if gemini_file:
             try:
                 gemini_client.files.delete(name=gemini_file.name)
-                logger.info(f"Cleaned up remote Gemini file: {gemini_file.name}")
             except Exception as e:
-                logger.warning(f"Could not delete remote Gemini file: {e}")
+                pass

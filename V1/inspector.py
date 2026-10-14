@@ -1,399 +1,370 @@
 import re
+import json
 import logging
 
 logger = logging.getLogger("Inspector")
 
-# Patterns for recognizing document semantics
-SESSION_NAME_PATTERN = re.compile(r"^session\s+(\d+)", re.IGNORECASE)
-TEMPLATE_NAME_PATTERN = re.compile(r"(?:^_?template\b|\btemplate$)", re.IGNORECASE)
-
-# Patterns for parsing tagged entity sections and field metadata
-TAGGED_SECTION_PATTERN = re.compile(r"(\[[a-zA-Z0-9]{3}\])\s*([^:\n\r(]+):?")
-INSTRUCTION_PATTERN = re.compile(r"\(([^)]+)\)")
-KEY_VALUE_LINE_PATTERN = re.compile(r"^[•\-*]?\s*([^:\n\r]+):\s*(.*)$")
-
-# Fallback keywords for detecting session headings when styles aren't set to HEADING_1/2
-SESSION_HEADING_KEYWORDS = [
-    "ai ideas for session",
-    "general plot for session",
-    "previous notes summary",
-    "session notes",
-    "chronological history",
-]
+SESSION_NAME_PATTERN = re.compile(r"^Session\s+(\d+)", re.IGNORECASE)
+TEMPLATE_NAME_PATTERN = re.compile(r"template", re.IGNORECASE)
+TAG_PATTERN = re.compile(r"\{\{([^}]+)\}\}")
+BRACKET_TAG_PATTERN = re.compile(r"^\[(.*?)\]\s*(.*)$")
+TEMPLATE_HEADING_PATTERN = re.compile(r"^\[(.*?)\]\s*(.*?)(?::)?(?:\s*\((.*?)\))?$")
+KV_ITEM_PATTERN = re.compile(r"^(?:-\s*)?([^:]+?)\s*:\s*\((.*?)\)\s*$")
+ENTITY_KV_PATTERN = re.compile(r"^(?:[-*•]\s*)?([^:]+?)\s*:\s*(.*)$")
 
 
-def extract_plain_text(content_elements):
-    """Recursively extracts plain text from structural elements of a Google Doc tab."""
-    text_pieces = []
-    for element in content_elements:
-        if "paragraph" in element:
-            for pe in element["paragraph"].get("elements", []):
-                if "textRun" in pe:
-                    text_pieces.append(pe["textRun"].get("content", ""))
-    return "".join(text_pieces)
+def parse_entity_kv_item(line_text: str) -> dict | None:
+    """Parses a bullet line into a key/value pair if it matches 'Key: Value' syntax."""
+    clean_line = line_text.replace("\xa0", " ").strip()
+    match = ENTITY_KV_PATTERN.match(clean_line)
+    if not match:
+        return None
+
+    key = match.group(1).strip()
+    val = match.group(2).strip()
+
+    return {"key": key, "value": val}
 
 
-def parse_mutability_mode(instruction_str):
-    """Extracts mutability mode (Static, Overwrite, Append, Don't Change)."""
-    inst_lower = instruction_str.lower()
-    if "don't change" in inst_lower or "dont change" in inst_lower:
-        return "dont_change"
-    if "overwrite" in inst_lower:
-        return "overwrite"
-    if "append" in inst_lower or "union" in inst_lower:
-        return "append"
-    return "static"
+def parse_kv_item(bullet_text: str) -> dict | None:
+    # Replace non-breaking spaces (\xa0) with standard spaces
+    clean_line = bullet_text.replace("\xa0", " ").strip()
+
+    match = KV_ITEM_PATTERN.match(clean_line)
+    if not match:
+        return None
+
+    item_heading = match.group(1).strip()
+    raw_paren = match.group(2) or ""
+
+    contract = parse_contract_parts(raw_paren)
+
+    return {
+        "heading": item_heading,
+        "mode": contract["mode"],
+        "type": contract["type"],
+        "prompt": contract["prompt"],
+    }
 
 
-def parse_template_sections(content_elements):
-    """
-    Parses sections and field blueprints from any entity template tab.
-    Detects tagged headings like [0j9] Physical Appearance: (Static: Paragraph).
-    """
+def parse_contract_parts(raw_paren: str) -> dict:
+    """Splits '(Mode: Type: Prompt)' into mode, type, and prompt."""
+    if not raw_paren:
+        return {"mode": "Append", "type": "Paragraph", "prompt": ""}
+
+    cleaned = raw_paren.strip()
+
+    # Case 1: Standalone directive without colons like '(Don’t Change)'
+    if ":" not in cleaned:
+        return {"mode": cleaned, "type": "Immutable", "prompt": ""}
+
+    # Case 2: Split by ':' into up to 3 pieces: [Mode, Type, Prompt]
+    parts = [p.strip() for p in cleaned.split(":", 2)]
+
+    mode = parts[0] if len(parts) > 0 and parts[0] else "Append"
+    data_type = parts[1] if len(parts) > 1 and parts[1] else "Paragraph"
+    prompt = parts[2] if len(parts) > 2 else ""
+
+    return {"mode": mode, "type": data_type, "prompt": prompt}
+
+
+def parse_template_sections(content: list) -> list:
+    """Parses raw Google Docs elements from a template tab into blueprint sections."""
     sections = []
-    current_section = None
+    current_sec = None
 
-    for element in content_elements:
-        raw_text = extract_plain_text([element]).strip()
-        if not raw_text:
+    for elem in content:
+        p = elem.get("paragraph")
+        if not p:
             continue
 
-        tag_match = TAGGED_SECTION_PATTERN.search(raw_text)
-        if tag_match:
-            if current_section:
-                sections.append(current_section)
+        style_type = p.get("paragraphStyle", {}).get("namedStyleType", "NORMAL_TEXT")
+        is_bullet = "bullet" in p
 
-            tag = tag_match.group(1)
-            name = tag_match.group(2).strip()
+        # Extract the plain text from the paragraph
+        raw_text = "".join(pe.get("textRun", {}).get("content", "") for pe in p.get("elements", []))
+        cleaned_text = raw_text.strip()
+        if not cleaned_text:
+            continue
 
-            inst_match = INSTRUCTION_PATTERN.search(raw_text)
-            instruction = inst_match.group(1).strip() if inst_match else ""
-            inst_lower = instruction.lower()
+        # Skip document title at the very top (e.g., "Character Name")
+        if style_type in ["TITLE", "SUBTITLE"] and not sections:
+            continue
 
-            if "keyvaluelist" in inst_lower:
-                elem_type = "key_value_list"
-            elif "bulletlist" in inst_lower:
-                elem_type = "bullet_list"
-            else:
-                elem_type = "paragraph"
+        # ------------------------------------------------------------------
+        # 1. HEADING: Starts a new section
+        # ------------------------------------------------------------------
+        if style_type.startswith("HEADING_"):
+            if current_sec:
+                sections.append(current_sec)
 
-            mutability = parse_mutability_mode(instruction)
+            tag = None
+            heading_title = cleaned_text
+            raw_paren = ""
 
-            current_section = {
+            match = TEMPLATE_HEADING_PATTERN.match(cleaned_text)
+            if match:
+                tag = match.group(1).strip()
+                heading_title = match.group(2).strip()
+                raw_paren = match.group(3) or ""
+
+            contract = parse_contract_parts(raw_paren)
+
+            # Build the base section
+            current_sec = {
+                "heading": heading_title,
                 "tag": tag,
-                "key": name,
-                "instruction": instruction,
-                "type": elem_type,
-                "mutability": mutability,
+                "style": style_type,
+                "type": contract["type"],
+                "mode": contract["mode"],
+                "prompt": contract["prompt"],
             }
 
-            if elem_type == "key_value_list":
-                current_section["fields"] = {}
-        else:
-            if current_section and current_section["type"] == "key_value_list":
-                kv_match = KEY_VALUE_LINE_PATTERN.match(raw_text)
-                if kv_match:
-                    field_key = kv_match.group(1).strip()
-                    raw_val = kv_match.group(2).strip()
-                    sub_inst_match = INSTRUCTION_PATTERN.search(raw_val)
-                    field_inst = sub_inst_match.group(1).strip() if sub_inst_match else raw_val
-                    current_section["fields"][field_key] = {
-                        "instruction": field_inst,
-                        "mutability": parse_mutability_mode(field_inst),
-                    }
+            # If it's a KeyValueList, initialize the 'values' container
+            if contract["type"].lower() == "keyvaluelist":
+                current_sec["values"] = []
 
-    if current_section:
-        sections.append(current_section)
+        # ------------------------------------------------------------------
+        # 2. BODY CONTENT: Collect items if we're inside a KeyValueList
+        # ------------------------------------------------------------------
+        else:
+            if not current_sec:
+                continue
+
+            if current_sec.get("type", "").lower() == "keyvaluelist" and is_bullet:
+                item_data = parse_kv_item(cleaned_text)
+                if item_data:
+                    current_sec["values"].append(item_data)
+
+    # Don't forget the last section
+    if current_sec:
+        sections.append(current_sec)
 
     return sections
 
 
-def is_session_heading(raw_text, named_style):
-    """Matches session section headings via keywords or heading styles."""
-    stripped = raw_text.strip().rstrip(":")
-    stripped_lower = stripped.lower()
-
-    for keyword in SESSION_HEADING_KEYWORDS:
-        if stripped_lower == keyword or stripped_lower.startswith(keyword):
-            return stripped
-
-    if named_style and named_style.startswith("HEADING_"):
-        if len(stripped.splitlines()) == 1 and len(stripped) < 80:
-            return stripped
-
-    return None
-
-
-def parse_session_sections(content_elements):
-    """Parses untagged session tabs into structured heading-content pairs."""
+def parse_tab_sections(content: list) -> list:
+    """Parses raw Google Docs elements into structured sections."""
     sections = []
-    header_lines = []
-    current_section = None
+    current_sec = None
 
-    for element in content_elements:
-        if "paragraph" not in element:
+    for elem in content:
+        p = elem.get("paragraph")
+        if not p:
             continue
 
-        paragraph = element["paragraph"]
-        named_style = paragraph.get("paragraphStyle", {}).get("namedStyleType", "NORMAL_TEXT")
-        raw_text = extract_plain_text([element])
-        stripped = raw_text.strip()
+        style_type = p.get("paragraphStyle", {}).get("namedStyleType", "NORMAL_TEXT")
+        is_bullet = "bullet" in p
 
-        if not stripped:
+        # Extract text runs from paragraph
+        raw_text = "".join(pe.get("textRun", {}).get("content", "") for pe in p.get("elements", []))
+        cleaned_text = raw_text.strip()
+        if not cleaned_text:
             continue
 
-        detected_heading = is_session_heading(stripped, named_style)
+        # Check for heading triggers (only if not a bullet)
+        if (style_type.startswith("HEADING_") or style_type in ["TITLE", "SUBTITLE"]) and not is_bullet:
+            if current_sec:
+                sections.append(current_sec)
 
-        if detected_heading:
-            if current_section:
-                current_section["content"] = "\n".join(current_section["_lines"]).strip()
-                del current_section["_lines"]
-                sections.append(current_section)
+            # If it's the document TITLE, store heading as "TITLE" and text as content
+            if style_type == "TITLE":
+                current_sec = {
+                    "heading": "TITLE",
+                    "tag": None,
+                    "style": style_type,
+                    "type": "paragraph",
+                    "content": cleaned_text,
+                }
+                continue
 
-            current_section = {
-                "tag": None,
-                "key": detected_heading,
-                "type": "bullet_list" if "bullet" in paragraph else "paragraph",
-                "_lines": [],
-            }
-        else:
-            if current_section:
-                current_section["_lines"].append(stripped)
-                if "bullet" in paragraph and current_section["type"] != "bullet_list":
-                    current_section["type"] = "bullet_list"
+            # Check for [tag] prefix: e.g. "[f2a] Personality"
+            tag_match = BRACKET_TAG_PATTERN.match(cleaned_text)
+            if tag_match:
+                tag = tag_match.group(1).strip()
+                heading_title = tag_match.group(2).strip()
             else:
-                header_lines.append(stripped)
+                tag = None
+                heading_title = cleaned_text
 
-    if current_section:
-        current_section["content"] = "\n".join(current_section["_lines"]).strip()
-        del current_section["_lines"]
-        sections.append(current_section)
-
-    return header_lines, sections
-
-
-def parse_entity_sections(content_elements):
-    """Parses active tagged entity tabs into structured sections and key-value fields."""
-    sections = []
-    header_lines = []
-    current_section = None
-
-    for element in content_elements:
-        raw_text = extract_plain_text([element])
-        stripped = raw_text.strip()
-        if not stripped:
-            continue
-
-        tag_match = TAGGED_SECTION_PATTERN.search(raw_text)
-        if tag_match:
-            if current_section:
-                if current_section["type"] != "key_value_list":
-                    current_section["content"] = "\n".join(current_section["_lines"]).strip()
-                del current_section["_lines"]
-                sections.append(current_section)
-
-            tag = tag_match.group(1)
-            name = tag_match.group(2).strip()
-
-            current_section = {
+            current_sec = {
+                "heading": heading_title,
                 "tag": tag,
-                "key": name,
+                "style": style_type,
                 "type": "paragraph",
-                "_lines": [],
+                "content": "",
             }
-
-            remainder = raw_text[tag_match.end() :].strip()
-            if remainder:
-                current_section["_lines"].append(remainder)
         else:
-            if current_section:
-                kv_match = KEY_VALUE_LINE_PATTERN.match(stripped)
-                if kv_match and (current_section["type"] == "key_value_list" or len(current_section["_lines"]) == 0):
-                    current_section["type"] = "key_value_list"
-                    if "fields" not in current_section:
-                        current_section["fields"] = {}
-                    current_section["fields"][kv_match.group(1).strip()] = kv_match.group(2).strip()
+            # If body text appears before any heading, assign an initial Overview section
+            if not current_sec:
+                current_sec = {
+                    "heading": "Overview",
+                    "tag": None,
+                    "style": "HEADING_1",
+                    "type": "paragraph",
+                    "content": "",
+                }
+
+            if is_bullet:
+                # Check for "Key: Value" formatting
+                kv_item = parse_entity_kv_item(cleaned_text)
+                if kv_item and current_sec["type"] in [
+                    "paragraph",
+                    "key_value_list",
+                ]:
+                    current_sec["type"] = "key_value_list"
+                    if not isinstance(current_sec["content"], dict):
+                        current_sec["content"] = {}
+                    current_sec["content"][kv_item["key"]] = kv_item["value"]
                 else:
-                    current_section["_lines"].append(stripped)
-                    if "bullet" in element.get("paragraph", {}) and current_section["type"] != "key_value_list":
-                        current_section["type"] = "bullet_list"
+                    current_sec["type"] = "bullet_list"
+                    if not isinstance(current_sec["content"], list):
+                        current_sec["content"] = [current_sec["content"]] if current_sec["content"] else []
+                    current_sec["content"].append(cleaned_text)
             else:
-                header_lines.append(stripped)
+                if isinstance(current_sec["content"], list):
+                    current_sec["content"].append(cleaned_text)
+                elif current_sec["content"]:
+                    current_sec["content"] += "\n" + cleaned_text
+                else:
+                    current_sec["content"] = cleaned_text
 
-    if current_section:
-        if current_section["type"] != "key_value_list":
-            current_section["content"] = "\n".join(current_section["_lines"]).strip()
-        del current_section["_lines"]
-        sections.append(current_section)
+    if current_sec:
+        sections.append(current_sec)
 
-    return header_lines, sections
+    return sections
 
 
-def run(docs_service, doc_id):
-    """
-    Inspects the Google Doc hierarchy dynamically.
-    Automatically detects category folders and entity schemas without hardcoded lists.
-    """
-    logger.info(f"Inspecting document structure (Doc ID: {doc_id})...")
+def extract_tab_info(tab_dict: dict) -> dict:
+    """Extracts essential properties from a single Google Docs tab node."""
+    props = tab_dict.get("tabProperties", {})
+    title = props.get("title", "Untitled").strip()
+    tab_id = props.get("tabId")
 
-    # Fetch document with all nested tab content
+    doc_tab = tab_dict.get("documentTab", {})
+    body = doc_tab.get("body", {})
+    content = body.get("content", [])
+
+    end_index = content[-1].get("endIndex", 1) if content else 1
+
+    if "Template" in title:
+        sections = parse_template_sections(content)
+    else:
+        sections = parse_tab_sections(content)
+
+    return {"title": title, "tab_id": tab_id, "end_index": end_index, "sections": sections}
+
+
+def parse_hierarchy(raw_tabs: list, doc_title: str, audio_file_name: str) -> dict:
+    campaign_node = {}
+    collections_node = {"items": {}}
+    sessions_node = {"items": {}}
+    other_tabs = {}
+
+    entities = []
+
+    for root_tab in raw_tabs:
+        root_info = extract_tab_info(root_tab)
+        root_title = root_info["title"]
+        root_title_lower = root_title.lower()
+        root_children = root_tab.get("childTabs", [])
+
+        # ----------------------------------------------------------
+        # 1. COLLECTIONS BRANCH (Categories -> Entities)
+        # ----------------------------------------------------------
+        if root_title_lower == "collections":
+            collections_node = root_info
+            collections_node["items"] = {}
+
+            for cat_tab in root_children:
+                cat_info = extract_tab_info(cat_tab)
+                cat_title = cat_info["title"]
+                cat_entities = cat_tab.get("childTabs", [])
+
+                cat_info["items"] = {}
+                for entity_tab in cat_entities:
+                    ent_info = extract_tab_info(entity_tab)
+                    if "Template" in ent_info["title"]:
+                        cat_info["template"] = ent_info
+                    else:
+                        cat_info["items"][ent_info["title"]] = ent_info
+                        entities.append(ent_info["title"])
+
+                collections_node["items"][cat_title] = cat_info
+
+        # ----------------------------------------------------------
+        # 2. SESSIONS BRANCH (Sessions -> Session Tabs)
+        # ----------------------------------------------------------
+        elif root_title_lower == "sessions":
+            sessions_node = root_info
+            sessions_node["items"] = {}
+
+            for session_tab in root_children:
+                s_info = extract_tab_info(session_tab)
+                sessions_node["items"][s_info["title"]] = s_info
+
+        # ----------------------------------------------------------
+        # 3. CAMPAIGN / WORLD INFO BRANCH
+        # ----------------------------------------------------------
+        elif root_title_lower == doc_title.lower() or not campaign_node:
+            campaign_node = root_info
+            campaign_node["items"] = {}
+
+            for sub_tab in root_children:
+                sub_info = extract_tab_info(sub_tab)
+                campaign_node["items"][sub_info["title"]] = sub_info
+
+        # ----------------------------------------------------------
+        # 4. ANYTHING ELSE
+        # ----------------------------------------------------------
+        else:
+            other_tabs[root_title] = root_info
+
+    # Calculate session numbers cleanly from the sessions branch
+    session_numbers = []
+    for s_title in sessions_node["items"].keys():
+        match = SESSION_NAME_PATTERN.match(s_title)
+        if match:
+            try:
+                session_numbers.append(int(match.group(1)))
+            except ValueError:
+                pass
+
+    session_numbers.sort()
+    latest_num = 0
+    match = re.search(r"\[Session\s+(\d+)\]", audio_file_name, re.IGNORECASE)
+    if match:
+        latest_num = int(match.group(1))
+    else:
+        latest_num = session_numbers[-1] if session_numbers else 0
+
+    return {
+        "title": doc_title,
+        "campaign": campaign_node,
+        "collections": collections_node,
+        "sessions": sessions_node,
+        "other": other_tabs,
+        "entities_list": entities,
+        "sessions_meta": {
+            "all_sessions": session_numbers,
+            "latest_session_num": latest_num,
+            "next_session_num": latest_num + 1,
+        },
+    }
+
+
+def run(docs_service, doc_id: str, audio_file_name: str) -> dict:
+    """Entrypoint to fetch and parse document hierarchy directly."""
     doc = docs_service.documents().get(documentId=doc_id, includeTabsContent=True).execute()
 
     doc_title = doc.get("title", "Untitled")
     raw_tabs = doc.get("tabs", [])
-    flat_tabs = []
 
-    # 1. Traverse document tab tree into a flat, depth-aware list
-    def collect(node_list, parent_name=None, depth=0):
-        for node in node_list:
-            props = node.get("tabProperties", {})
-            title = props.get("title", "Untitled").strip()
-            tab_id = props.get("tabId")
+    result = parse_hierarchy(raw_tabs, doc_title, audio_file_name)
+    result["doc_id"] = doc_id
 
-            doc_tab = node.get("documentTab", {})
-            body = doc_tab.get("body", {})
-            content = body.get("content", [])
-            text = extract_plain_text(content)
-            end_index = content[-1].get("endIndex", 1) if content else 1
+    # TEMPORARAY DEBUG
+    with open("/app/inspector_debug.json", "w", encoding="utf-8") as f:
+        json.dump(result, f, indent=2, default=str)
 
-            flat_tabs.append(
-                {
-                    "title": title,
-                    "tab_id": tab_id,
-                    "parent": parent_name,
-                    "depth": depth,
-                    "text": text,
-                    "content": content,
-                    "end_index": end_index,
-                }
-            )
-
-            children = node.get("childTabs", []) or props.get("childTabs", [])
-            if children:
-                collect(children, parent_name=title, depth=depth + 1)
-
-    collect(raw_tabs)
-
-    # 2. Group tabs by their parent tab name
-    children_by_parent = {}
-    for tab in flat_tabs:
-        parent = tab["parent"]
-        if parent:
-            children_by_parent.setdefault(parent, []).append(tab)
-
-    collections = {}
-    other_tabs = {}
-    session_numbers = []
-
-    # 3. Dynamic Collection Discovery: Detect collections from parent folders
-    for tab in flat_tabs:
-        title = tab["title"]
-        tab_id = tab["tab_id"]
-        children = children_by_parent.get(title, [])
-
-        # Sessions container detection
-        if title.lower() == "sessions" or any(SESSION_NAME_PATTERN.match(c["title"]) for c in children):
-            collections["sessions"] = {
-                "folder_title": title,
-                "folder_tab_id": tab_id,
-                "template": None,  # Sessions are created programmatically
-                "items": {},
-            }
-            continue
-
-        # Dynamic Entity Category detection: has children (including an optional template child)
-        if children:
-            category_key = title.lower().strip()
-            collections[category_key] = {
-                "folder_title": title,
-                "folder_tab_id": tab_id,
-                "template": None,
-                "items": {},
-            }
-
-    # Map folder names (lowercase) to their collection keys
-    parent_to_category = {coll["folder_title"].lower(): cat_key for cat_key, coll in collections.items()}
-
-    # 4. Categorize tabs and extract schemas
-    for tab in flat_tabs:
-        title = tab["title"]
-        parent = tab["parent"]
-        assigned_coll = parent_to_category.get(parent.lower()) if parent else None
-
-        if assigned_coll:
-            # Check if this child tab is a Template for the collection
-            if TEMPLATE_NAME_PATTERN.search(title):
-                parsed_template_sections = parse_template_sections(tab["content"])
-                collections[assigned_coll]["template"] = {
-                    "title": title,
-                    "tab_id": tab["tab_id"],
-                    "sections": parsed_template_sections,
-                }
-            elif assigned_coll == "sessions":
-                header_lines, item_sections = parse_session_sections(tab["content"])
-                sections_by_key = {s["key"].lower(): s["content"] for s in item_sections}
-
-                collections[assigned_coll]["items"][title] = {
-                    "title": title,
-                    "tab_id": tab["tab_id"],
-                    "depth": tab["depth"],
-                    "header_summary": "\n".join(header_lines) if header_lines else "",
-                    "full_text": tab["text"].strip(),
-                    "sections": item_sections,
-                    "sections_by_key": sections_by_key,
-                    "end_index": tab["end_index"],
-                }
-
-                sm = SESSION_NAME_PATTERN.match(title)
-                if sm:
-                    try:
-                        session_numbers.append(int(sm.group(1)))
-                    except ValueError:
-                        pass
-            else:
-                # Active entity instance tab (e.g. "Captain Karr", "The Hole", "Goblin")
-                header_lines, item_sections = parse_entity_sections(tab["content"])
-                collections[assigned_coll]["items"][title] = {
-                    "title": title,
-                    "tab_id": tab["tab_id"],
-                    "depth": tab["depth"],
-                    "header_summary": "\n".join(header_lines) if header_lines else "",
-                    "full_text": tab["text"].strip(),
-                    "sections": item_sections,
-                    "end_index": tab["end_index"],
-                }
-        else:
-            # Check if this tab is a category folder header itself
-            is_folder = any(c["folder_tab_id"] == tab["tab_id"] for c in collections.values())
-            if not is_folder:
-                other_tabs[title] = {
-                    "title": title,
-                    "tab_id": tab["tab_id"],
-                    "parent": parent,
-                    "depth": tab["depth"],
-                    "full_text": tab["text"].strip(),
-                    "end_index": tab["end_index"],
-                }
-
-    # 5. Session numbering calculation
-    session_numbers.sort()
-    latest_session_num = session_numbers[-1] if session_numbers else 0
-    next_session_num = latest_session_num + 1
-
-    # 6. Flat list of all active entity and session tab titles
-    all_tab_titles = list(other_tabs.keys())
-    for coll_data in collections.values():
-        all_tab_titles.extend(coll_data["items"].keys())
-
-    return {
-        "title": doc_title,
-        "doc_id": doc_id,
-        "all_tab_titles": all_tab_titles,
-        "sessions_meta": {
-            "all_sessions": session_numbers,
-            "latest_session_num": latest_session_num,
-            "next_session_num": next_session_num,
-        },
-        "collections": collections,
-        "other_tabs": other_tabs,
-    }
+    return result

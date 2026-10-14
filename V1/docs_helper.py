@@ -27,7 +27,24 @@ def build_tab_content_requests(tab_id: str, sections: list) -> list:
         sec_type = sec.get("type", "paragraph")
         content = sec.get("content")
 
-        # 1. Heading line
+        # -------------------------------------------------------------
+        # 1. SPECIAL CASE: Document Title
+        # -------------------------------------------------------------
+        if style == "TITLE":
+            # The title text is in content (e.g. "Session 1"), falling back to heading
+            title_text = str(content).strip() if content else (heading if heading != "TITLE" else "")
+            if title_text:
+                line = f"{title_text}\n"
+                start = current_idx
+                end = current_idx + len(line)
+                style_ranges.append({"start": start, "end": end, "style": "TITLE"})
+                full_text += line
+                current_idx = end
+            continue
+
+        # -------------------------------------------------------------
+        # 2. Standard Heading line (HEADING_1, etc.)
+        # -------------------------------------------------------------
         if heading:
             line = f"{heading}\n"
             start = current_idx
@@ -36,8 +53,27 @@ def build_tab_content_requests(tab_id: str, sections: list) -> list:
             full_text += line
             current_idx = end
 
-        # 2. Body content
-        if sec_type == "bullet_list":
+        # -------------------------------------------------------------
+        # 3. Body Content
+        # -------------------------------------------------------------
+        if sec_type == "key_value_list":
+            if isinstance(content, dict):
+                items = [f"{k}: {v}".strip() for k, v in content.items()]
+            else:
+                items = []
+
+            if items:
+                list_start = current_idx
+                for item in items:
+                    item_line = f"{item}\n"
+                    full_text += item_line
+                    current_idx += len(item_line)
+                list_end = current_idx
+
+                style_ranges.append({"start": list_start, "end": list_end, "style": "NORMAL_TEXT"})
+                bullet_ranges.append({"start": list_start, "end": list_end})
+
+        elif sec_type == "bullet_list":
             if isinstance(content, str):
                 items = [line.strip("- ").strip() for line in content.split("\n") if line.strip()]
             elif isinstance(content, list):
@@ -69,7 +105,7 @@ def build_tab_content_requests(tab_id: str, sections: list) -> list:
     if not full_text:
         return []
 
-    # 3. Assemble API operations in order
+    # 4. Assemble API operations in order
     requests = []
 
     # A: Insert all text at index 1
@@ -121,8 +157,6 @@ def execute_batch(docs_service, doc_id: str, requests: list):
     If any request in the batch fails, the entire transaction rolls back.
     """
     if not requests:
-        logger.info("No requests to execute; batchUpdate skipped.")
         return None
 
-    logger.info(f"Executing batchUpdate with {len(requests)} operations...")
     return docs_service.documents().batchUpdate(documentId=doc_id, body={"requests": requests}).execute()
