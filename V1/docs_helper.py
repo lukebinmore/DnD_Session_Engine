@@ -23,6 +23,7 @@ def build_tab_content_requests(tab_id: str, sections: list) -> list:
 
     for sec in sections:
         heading = (sec.get("heading") or "").strip()
+        tag = (sec.get("tag") or "").strip()
         style = sec.get("style", "HEADING_1").upper()
         sec_type = sec.get("type", "paragraph")
         content = sec.get("content")
@@ -46,6 +47,8 @@ def build_tab_content_requests(tab_id: str, sections: list) -> list:
         # 2. Standard Heading line (HEADING_1, etc.)
         # -------------------------------------------------------------
         if heading:
+            if tag:
+                heading = f"[{tag}] {heading}"
             line = f"{heading}\n"
             start = current_idx
             end = current_idx + len(line)
@@ -157,6 +160,20 @@ def execute_batch(docs_service, doc_id: str, requests: list):
     If any request in the batch fails, the entire transaction rolls back.
     """
     if not requests:
+        logger.debug("Skipping empty Google Docs batch for document '%s'.", doc_id)
         return None
 
-    return docs_service.documents().batchUpdate(documentId=doc_id, body={"requests": requests}).execute()
+    logger.info("Submitting %s Google Docs request(s) for document '%s'.", len(requests), doc_id)
+    try:
+        response = docs_service.documents().batchUpdate(documentId=doc_id, body={"requests": requests}).execute()
+    except Exception:
+        logger.exception("Google Docs batch update failed for document '%s'.", doc_id)
+        raise
+
+    reply_count = len(response.get("replies", [])) if isinstance(response, dict) else 0
+    logger.info(
+        "Google Docs batch update succeeded for document '%s' (%s reply/replies).",
+        doc_id,
+        reply_count,
+    )
+    return response

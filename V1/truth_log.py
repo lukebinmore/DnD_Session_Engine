@@ -57,6 +57,9 @@ def download_audio_from_drive(drive_service, file_id, dest_path):
         done = False
         while not done:
             status, done = downloader.next_chunk()
+            if status is not None:
+                progress_percent = status.progress() * 100
+                logger.info(f"Google Drive download progress: {progress_percent:.1f}%.")
 
 
 def run(
@@ -78,6 +81,7 @@ def run(
     os.makedirs(cache_dir, exist_ok=True)
     cache_file = os.path.join(cache_dir, f"{os.path.splitext(audio_file_name)[0]}_truth.txt")
     if os.path.exists(cache_file):
+        logger.info(f"Using cached truth log for '{audio_file_name}'.")
         with open(cache_file, "r", encoding="utf-8") as f:
             return f.read().strip()
 
@@ -88,7 +92,9 @@ def run(
     gemini_file = None
     try:
         # 2. Download audio file from Drive in 10MB chunks
+        logger.info(f"Downloading audio file '{audio_file_name}' from Google Drive...")
         download_audio_from_drive(drive_service, audio_file_id, tmp_audio_path)
+        logger.info(f"Downloaded audio file '{audio_file_name}'.")
 
         # 3. Upload to Gemini File API using explicit MIME detection
         mime_type = get_audio_mime_type(audio_file_name)
@@ -102,9 +108,14 @@ def run(
         )
 
         # 4. Poll until the Gemini servers finish processing the file
+        processing_started_at = time.monotonic()
+        if gemini_file.state.name == "PROCESSING":
+            logger.info(f"Gemini is processing '{audio_file_name}'; polling every 10 seconds...")
         while gemini_file.state.name == "PROCESSING":
             time.sleep(10)
             gemini_file = gemini_client.files.get(name=gemini_file.name)
+            elapsed_seconds = time.monotonic() - processing_started_at
+            logger.info(f"Gemini upload poll for '{audio_file_name}': state={gemini_file.state.name}.")
 
         if gemini_file.state.name != "ACTIVE":
             raise RuntimeError(f"Audio file upload failed with state: {gemini_file.state.name}")
@@ -119,6 +130,7 @@ Known Campaign Entities (use exact spelling where applicable):
 Capture initial vocal characterizations under [Voice: ...] rules, ignoring subsequent accent drops."""
 
         # 6. Execute generation with dynamic retry and fallback
+        logger.info(f"Generating truth log for '{audio_file_name}'...")
         response = gemini_helper.generate_with_fallback(
             gemini_client=gemini_client,
             contents=[gemini_file, user_prompt],
@@ -133,6 +145,7 @@ Capture initial vocal characterizations under [Voice: ...] rules, ignoring subse
         # 7. Write to cache file on disk
         with open(cache_file, "w", encoding="utf-8") as f:
             f.write(truth_log_text)
+        logger.info(f"Generated and cached truth log for '{audio_file_name}' " f"({len(truth_log_text)} characters).")
 
         return truth_log_text
 
@@ -141,7 +154,8 @@ Capture initial vocal characterizations under [Voice: ...] rules, ignoring subse
         if os.path.exists(tmp_audio_path):
             try:
                 os.remove(tmp_audio_path)
-            except OSError:
+            except OSError as e:
+                logger.warning(f"Could not remove temporary audio file: {e}\n")
                 pass
 
         # Cleanup remote Gemini audio upload to prevent storage accumulation
@@ -149,4 +163,4 @@ Capture initial vocal characterizations under [Voice: ...] rules, ignoring subse
             try:
                 gemini_client.files.delete(name=gemini_file.name)
             except Exception as e:
-                pass
+                logger.warning(f"Could not delete Gemini upload '{gemini_file.name}': {e}\n")

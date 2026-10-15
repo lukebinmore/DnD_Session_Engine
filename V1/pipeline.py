@@ -5,6 +5,7 @@ import inspector
 import truth_log
 import session_creator
 import entity_updater
+import entity_creator
 
 # Force reload modules if running in a persistent daemon/watcher container
 importlib.reload(file_helper)
@@ -12,6 +13,7 @@ importlib.reload(inspector)
 importlib.reload(truth_log)
 importlib.reload(session_creator)
 importlib.reload(entity_updater)
+importlib.reload(entity_creator)
 
 logger = logging.getLogger("Pipeline")
 
@@ -38,83 +40,105 @@ def run(
         # =====================================================================
         # Inspection & Schema Parsing
         # =====================================================================
-        logger.info(f"[{campaign_name}] [STAGE {current_stage}/{stages}] Inspecting document structure & templates...")
-        doc_meta = inspector.run(docs_service=docs_service, doc_id=doc_id, audio_file_name=audio_file_name)
-        known_tabs = doc_meta.get("entities_list", [])
-        logger.info(f"[{campaign_name}] [STAGE {current_stage}/{stages}] Success: Parsed document metadata & tabs.\n")
-        current_stage += 1
+        if True:
+            logger.info(
+                f"[{campaign_name}] [STAGE {current_stage}/{stages}] Inspecting document structure & templates..."
+            )
+            doc_meta = inspector.run(docs_service=docs_service, doc_id=doc_id, audio_file_name=audio_file_name)
+            known_tabs = doc_meta.get("entities_list", [])
+            logger.info(f"[{campaign_name}] [STAGE {current_stage}/{stages}] Success.\n")
+            current_stage += 1
 
         # =====================================================================
-        # Inspection & Schema Parsing
+        # File Session Naming
         # =====================================================================
-        logger.info(f"[{campaign_name}] [Stage {current_stage}/{stages}] Storing session number in file name...")
-        session_num = doc_meta.get("session_meta", {}).get("latest_session_num", 1)
-        audio_file_name = file_helper.mark_file_session(drive_service, audio_file_id, audio_file_name, session_num)
-        logger.info(f"[{campaign_name}] [Stage {current_stage}/{stages}] Success: Updated file name on Drive\n")
-        current_stage += 1
+        if True:
+            logger.info(f"[{campaign_name}] [Stage {current_stage}/{stages}] Storing session number in file name...")
+            session_num = doc_meta.get("sessions_meta", {}).get("latest_session_num", 1)
+            audio_file_name = file_helper.mark_file_session(drive_service, audio_file_id, audio_file_name, session_num)
+            logger.info(f"[{campaign_name}] [STAGE {current_stage}/{stages}] Success.\n")
+            current_stage += 1
 
         # =====================================================================
         # Truth Log (Audio -> Objective Event Ledger)
         # =====================================================================
-        logger.info(
-            f"[{campaign_name}] [STAGE {current_stage}/{stages}] Generating chronological truth log via Gemini..."
-        )
-        truth_log_text = truth_log.run(
-            drive_service=drive_service,
-            gemini_client=gemini_client,
-            audio_file_id=audio_file_id,
-            audio_file_name=audio_file_name,
-            known_tabs=known_tabs,
-            cache_dir="/app/truth_logs",
-        )
-        logger.info(
-            f"[{campaign_name}] [STAGE {current_stage}/{stages}] Success: Truth log generated ({len(truth_log_text.splitlines())} events).\n"
-        )
-        current_stage += 1
+        if True:
+            logger.info(
+                f"[{campaign_name}] [STAGE {current_stage}/{stages}] Generating chronological truth log via Gemini..."
+            )
+            truth_log_text = truth_log.run(
+                drive_service=drive_service,
+                gemini_client=gemini_client,
+                audio_file_id=audio_file_id,
+                audio_file_name=audio_file_name,
+                known_tabs=known_tabs,
+                cache_dir="/app/truth_logs",
+            )
+            logger.info(f"[{campaign_name}] [STAGE {current_stage}/{stages}] Success.\n")
+            current_stage += 1
 
         # =====================================================================
         # Session Tab Creation & Ingestion
         # =====================================================================
-        logger.info(f"[{campaign_name}] [STAGE {current_stage}/{stages}] Starting Session Tab Creation & Ingestion...")
-        session_result = session_creator.run(
-            docs_service=docs_service,
-            gemini_client=gemini_client,
-            doc_id=doc_id,
-            doc_meta=doc_meta,
-            truth_log=truth_log_text,
-        )
-        logger.info(
-            f"[{campaign_name}] [STAGE {current_stage}/{stages}] Success: Tab '{session_result['tab_title']}' created and populated.\n"
-        )
-        current_stage += 1
+        if True:
+            logger.info(
+                f"[{campaign_name}] [STAGE {current_stage}/{stages}] Starting Session Tab Creation & Ingestion..."
+            )
+            session_result = session_creator.run(
+                docs_service=docs_service,
+                gemini_client=gemini_client,
+                doc_id=doc_id,
+                doc_meta=doc_meta,
+                truth_log=truth_log_text,
+            )
+            logger.info(f"[{campaign_name}] [STAGE {current_stage}/{stages}] Success.\n")
+            current_stage += 1
 
         # =====================================================================
         # Entity Reconciliation & Ledger (Delta Extraction)
         # =====================================================================
-        """
-        logger.info(f"[{campaign_name}] [STAGE {current_stage}/{stages}] Starting Entity Updates...")
-        entity_results = entity_updater.run(
-            gemini_client=gemini_client,
-            truth_log=truth_log,
-            doc_meta=doc_meta,
-            docs_service=docs_service,
-            doc_id=doc_id,
-        )
-        logger.info(f"[{campaign_name}] [STAGE {current_stage}/{stages}] Success: Entity updates are completed.\n")
-        current_stage += 1
-        """
+        if True:
+            logger.info(f"[{campaign_name}] [STAGE {current_stage}/{stages}] Starting Entity Updates...")
+            entity_results = entity_updater.run(
+                gemini_client=gemini_client,
+                truth_log=truth_log_text,
+                doc_meta=doc_meta,
+                docs_service=docs_service,
+                doc_id=doc_id,
+            )
+            logger.info(f"[{campaign_name}] [STAGE {current_stage}/{stages}] Success.\n")
+            current_stage += 1
 
         # =====================================================================
-        # Document Mutation & Tab Updates
+        # New Entity Creation
         # =====================================================================
-        # logger.info(f"[{campaign_name}] [STAGE 5/6] Pending: Applying batch updates to Google Doc...")
+        if True:
+            logger.info(f"[{campaign_name}] [STAGE {current_stage}/{stages}] Starting Entity Creation...")
+            entity_results = entity_creator.run(
+                gemini_client=gemini_client,
+                truth_log=truth_log_text,
+                doc_meta=doc_meta,
+                docs_service=docs_service,
+                doc_id=doc_id,
+            )
+            logger.info(f"[{campaign_name}] [STAGE {current_stage}/{stages}] Success.\n")
+            current_stage += 1
 
         # =====================================================================
         # Hyperlinking & Formatting Cleanup
         # =====================================================================
-        # logger.info(f"[{campaign_name}] [STAGE 6/6] Pending: Internal hyperlinking...")
+        if False:
+            logger.info(f"[{campaign_name}] [STAGE {current_stage}/{stages}] ...")
+            logger.info(f"[{campaign_name}] [STAGE {current_stage}/{stages}] Success.\n")
+            current_stage += 1
 
-        file_helper.mark_file_processed(drive_service, audio_file_id, audio_file_name, campaign_name)
+        # =====================================================================
+        # File Cleanup
+        # =====================================================================
+        if True:
+            logger.info(f"[{campaign_name}] [STAGE {current_stage}/{stages}] Marking file as processed...")
+            file_helper.mark_file_processed(drive_service, audio_file_id, audio_file_name, campaign_name)
+            logger.info(f"[{campaign_name}] [STAGE {current_stage}/{stages}] Success.\n")
 
         logger.info("------------------------------------------------------------")
         logger.info(f"[{campaign_name}] Pipeline completed successfully for '{audio_file_name}'.")

@@ -1,10 +1,11 @@
 import json
 import logging
-import uuid
+import re
 import gemini_helper
 import docs_helper
 
 logger = logging.getLogger("SessionCreator")
+SESSION_TITLE_PATTERN = re.compile(r"^Session\s+(\d+)\b", re.IGNORECASE)
 
 SESSION_PROMPT = """You are an expert tabletop scribe and DM assistant for a D&D campaign.
 
@@ -54,6 +55,7 @@ CURRENT SESSION TRUTH LOG (Active Session):
     # Parse and return as a standard Python dictionary
     data = json.loads(response.text)
     data["general_plot_for_session"] = ""
+    logger.info("Session content synthesized and parsed successfully.")
     return data
 
 
@@ -66,157 +68,146 @@ def get_sections_map(sections_list: list) -> dict:
     return sec_map
 
 
+def find_session_item(sessions_node, session_num):
+    """Finds a session tab by its numeric prefix, avoiding partial matches like 1/10."""
+    for title, item in sessions_node.get("items", {}).items():
+        match = SESSION_TITLE_PATTERN.match(title)
+        if match and int(match.group(1)) == session_num:
+            return title, item
+    return None, None
+
+
+def build_session_payload(title, existing_item=None, content_overrides=None, include_retrospective=False):
+    """Builds the standard session sections, preserving existing content unless overridden."""
+    existing_sections = get_sections_map((existing_item or {}).get("sections", []))
+    content = {
+        "date": existing_sections.get("date", ""),
+        "ai_ideas": existing_sections.get("ai ideas for session", []),
+        "general_plot": existing_sections.get("general plot for session", ""),
+        "previous_summary": existing_sections.get("previous notes summary", ""),
+        "session_notes": existing_sections.get("session notes", []),
+        "chronological_history": existing_sections.get("chronological history", []),
+    }
+    content.update(content_overrides or {})
+
+    sections = [
+        {"heading": "TITLE", "style": "TITLE", "type": "paragraph", "content": title},
+        {"heading": "Date", "style": "HEADING_1", "type": "paragraph", "content": content["date"]},
+        {
+            "heading": "AI Ideas for Session",
+            "style": "HEADING_1",
+            "type": "bullet_list",
+            "content": content["ai_ideas"],
+        },
+        {
+            "heading": "General Plot for Session",
+            "style": "HEADING_1",
+            "type": "bullet_list",
+            "content": content["general_plot"],
+        },
+        {
+            "heading": "Previous Notes Summary",
+            "style": "HEADING_1",
+            "type": "paragraph",
+            "content": content["previous_summary"],
+        },
+    ]
+
+    if include_retrospective:
+        sections.extend(
+            [
+                {
+                    "heading": "Session Notes",
+                    "style": "HEADING_1",
+                    "type": "bullet_list",
+                    "content": content["session_notes"],
+                },
+                {
+                    "heading": "Chronological History",
+                    "style": "HEADING_1",
+                    "type": "bullet_list",
+                    "content": content["chronological_history"],
+                },
+            ]
+        )
+
+    return sections
+
+
 def build_current_session_payload(doc_meta, current_num, session_data):
-    """Extracts preserved prep from Session N (including any manual date/subtitle),
-    and combines it with fresh retrospective notes and title.
-    """
-    tab_title = f"Session {current_num}"
-    sessions_coll = doc_meta.get("sessions", {})
-
-    existing_item = sessions_coll.get("items", {}).get(tab_title, {})
+    """Builds the completed-session payload while retaining existing prep fields."""
+    tab_title, existing_item = find_session_item(doc_meta.get("sessions", {}), current_num)
     if not existing_item:
-        for title_key, item in sessions_coll.get("items", {}).items():
-            if title_key.startswith(f"Session {current_num}"):
-                existing_item = item
-                break
-
-    if not existing_item:
-        raise ValueError(f"Cannot close out '{tab_title}': tab not found in doc_meta['sessions']['items'].")
+        raise ValueError(f"Cannot close out 'Session {current_num}': tab not found in doc_meta['sessions']['items'].")
 
     tab_id = existing_item.get("tab_id")
-    end_index = existing_item.get("end_index", 1)
-
     if not tab_id:
         raise ValueError(f"Cannot close out '{tab_title}': tabId not found in doc_meta.")
 
-    # 1. Pull preserved prep fields
-    sections_map = get_sections_map(existing_item.get("sections", []))
-    preserved_date = sections_map.get("date", "")
-    preserved_ai_ideas = sections_map.get("ai ideas for session", [])
-    preserved_plot = sections_map.get("general plot for session", "")
-    preserved_recap = sections_map.get("previous notes summary", "")
-
-    if isinstance(preserved_ai_ideas, str) and preserved_ai_ideas:
-        preserved_ai_ideas = [line.strip("- ").strip() for line in preserved_ai_ideas.split("\n") if line.strip()]
-
-    # 2. Build full retrospective title
     session_name = session_data.get("session_name", "").strip()
-    full_title = f"Session {current_num}: {session_name}" if session_name else f"Session {current_num}"
+    title = f"Session {current_num}: {session_name}" if session_name else f"Session {current_num}"
+    sections = build_session_payload(
+        title=title,
+        existing_item=existing_item,
+        content_overrides={
+            "session_notes": session_data.get("session_notes", []),
+            "chronological_history": session_data.get("chronological_history", []),
+        },
+        include_retrospective=True,
+    )
 
-    # 3. Assemble sections with TITLE, preserved SUBTITLE, and HEADING_1
-    sections = [
-        {
-            "heading": "TITLE",
-            "style": "TITLE",
-            "type": "paragraph",
-            "content": full_title,
-        },
-        {
-            "heading": "Date",
-            "style": "HEADING_1",
-            "type": "paragraph",
-            "content": preserved_date,
-        },
-        {
-            "heading": "AI Ideas for Session",
-            "style": "HEADING_1",
-            "type": "bullet_list",
-            "content": preserved_ai_ideas,
-        },
-        {
-            "heading": "General Plot for Session",
-            "style": "HEADING_1",
-            "type": "bullet_list",
-            "content": preserved_plot,
-        },
-        {
-            "heading": "Previous Notes Summary",
-            "style": "HEADING_1",
-            "type": "paragraph",
-            "content": preserved_recap,
-        },
-        {
-            "heading": "Session Notes",
-            "style": "HEADING_1",
-            "type": "bullet_list",
-            "content": session_data.get("session_notes", []),
-        },
-        {
-            "heading": "Chronological History",
-            "style": "HEADING_1",
-            "type": "bullet_list",
-            "content": session_data.get("chronological_history", []),
-        },
-    ]
-
-    return tab_id, end_index, sections
+    return tab_id, existing_item.get("end_index", 1), sections
 
 
-def build_next_session_payload(next_num, session_data):
-    """Builds the prep payload for Session N+1 with a simple title,
-    an empty slot ready for your manual date entry,
-    fresh prep ideas, blank plot, and fresh recap.
-    """
-    new_tab_id = f"t.session_{next_num}_{uuid.uuid4().hex[:6]}"
-    tab_title = f"Session {next_num}"
+def build_next_session_payload(doc_meta, next_num, session_data):
+    """Builds prep for the next session, reusing its tab and preserving manual fields if present."""
+    tab_title, existing_item = find_session_item(doc_meta.get("sessions", {}), next_num)
+    tab_title = tab_title or f"Session {next_num}"
+    existing_sections = get_sections_map((existing_item or {}).get("sections", []))
 
-    sections = [
-        {
-            "heading": "TITLE",
-            "style": "TITLE",
-            "type": "paragraph",
-            "content": tab_title,
-        },
-        {
-            "heading": "Date",
-            "style": "HEADING_1",
-            "type": "paragraph",
-            "content": "",
-        },
-        {
-            "heading": "AI Ideas for Session",
-            "style": "HEADING_1",
-            "type": "bullet_list",
-            "content": session_data.get("ai_ideas_for_session", []),
-        },
-        {
-            "heading": "General Plot for Session",
-            "style": "HEADING_1",
-            "type": "bullet_list",
-            "content": "",
-        },
-        {
-            "heading": "Previous Notes Summary",
-            "style": "HEADING_1",
-            "type": "paragraph",
-            "content": session_data.get("previous_notes_summary", ""),
-        },
-    ]
+    tab_id = existing_item.get("tab_id") if existing_item else None
+    if existing_item and not tab_id:
+        raise ValueError(f"Cannot update '{tab_title}': tabId not found in doc_meta.")
 
-    return new_tab_id, tab_title, sections
+    title = existing_sections.get("title") or tab_title
+    sections = build_session_payload(
+        title=title,
+        existing_item=existing_item,
+        content_overrides={
+            "ai_ideas": session_data.get("ai_ideas_for_session", []),
+            "previous_summary": session_data.get("previous_notes_summary", ""),
+        },
+        include_retrospective=bool(
+            existing_sections.get("session notes") or existing_sections.get("chronological history")
+        ),
+    )
+
+    end_index = existing_item.get("end_index", 1) if existing_item else None
+    return tab_id, end_index, tab_title, sections
 
 
 def run(gemini_client, truth_log, doc_meta, docs_service=None, doc_id=None, **kwargs):
     """Synthesizes notes and executes an atomic batch update in Google Docs:
     1. Wipes and writes retrospective notes for Session N.
-    2. Spawns Session N+1 under the Sessions folder tab.
-    3. Populates prep sections in Session N+1.
+    2. Updates Session N+1 if it exists, otherwise creates it.
     """
     sessions_node = doc_meta.get("sessions", {})
 
     # 1. Determine active and upcoming session numbers
     current_num = doc_meta.get("sessions_meta", {}).get("latest_session_num", 1)
     next_num = doc_meta.get("sessions_meta", {}).get("next_session_num", 2)
+    logger.info(
+        "Preparing session update: Session %s is current; Session %s is next.",
+        current_num,
+        next_num,
+    )
 
     # 2. Extract recap/summary context from the current session tab
-    tab_title = f"Session {current_num}"
-    current_session = sessions_node.get("items", {}).get(tab_title)
-
-    if not current_session:
-        for k, v in sessions_node.get("items", {}).items():
-            if k.startswith(f"Session {current_num}"):
-                current_session = v
-                break
+    tab_title, current_session = find_session_item(sessions_node, current_num)
+    if current_session:
+        logger.info("Found current session tab '%s' for update.", tab_title)
+    else:
+        logger.warning("Could not find current session tab for Session %s while preparing context.", current_num)
 
     sections_map = get_sections_map(current_session.get("sections", [])) if current_session else {}
 
@@ -238,13 +229,18 @@ def run(gemini_client, truth_log, doc_meta, docs_service=None, doc_id=None, **kw
         session_data=session_data,
     )
 
-    next_tab_id, next_tab_title, next_sections = build_next_session_payload(
+    next_tab_id, next_end_idx, next_tab_title, next_sections = build_next_session_payload(
+        doc_meta=doc_meta,
         next_num=next_num,
         session_data=session_data,
     )
+    if next_tab_id:
+        logger.info("Found next session tab '%s'; it will be updated.", next_tab_title)
+    else:
+        logger.info("Next session tab '%s' does not exist; it will be created.", next_tab_title)
 
     # 5. Build API requests using docs_helper
-    # --- BATCH 1: Update Session N + Add Tab for Session N+1 ---
+    # --- BATCH 1: Update Session N and update or add Session N+1 ---
     batch1_requests = []
 
     # 1. Clear & rewrite Session N
@@ -261,49 +257,66 @@ def run(gemini_client, truth_log, doc_meta, docs_service=None, doc_id=None, **kw
         )
     )
 
-    # 2. Add Session N+1 tab under parent folder
-    parent_tab_id = sessions_node.get("tab_id")
-    batch1_requests.append(
-        docs_helper.build_add_tab_request(
-            title=next_tab_title,
-            parent_tab_id=parent_tab_id,
+    if next_tab_id:
+        batch1_requests.extend(
+            docs_helper.build_clear_tab_request(
+                tab_id=next_tab_id,
+                end_index=next_end_idx,
+            )
         )
-    )
+        batch1_requests.extend(
+            docs_helper.build_tab_content_requests(
+                tab_id=next_tab_id,
+                sections=next_sections,
+            )
+        )
+    else:
+        parent_tab_id = sessions_node.get("tab_id")
+        batch1_requests.append(
+            docs_helper.build_add_tab_request(
+                title=next_tab_title,
+                parent_tab_id=parent_tab_id,
+            )
+        )
 
     if docs_service and doc_id:
-        response1 = docs_helper.execute_batch(
+        logger.info("Submitting %s Google Docs request(s) for the session update.", len(batch1_requests))
+        response = docs_helper.execute_batch(
             docs_service=docs_service,
             doc_id=doc_id,
             requests=batch1_requests,
         )
 
-        # Extract the server-generated tabId from the addDocumentTab response
-        replies = response1.get("replies", [])
-        add_tab_reply = next(
-            (r["addDocumentTab"] for r in replies if "addDocumentTab" in r),
-            None,
-        )
-
-        # tabId is nested inside tabProperties
-        tab_props = add_tab_reply.get("tabProperties", {}) if add_tab_reply else {}
-        new_server_tab_id = tab_props.get("tabId")
-
-        if not new_server_tab_id:
-            raise RuntimeError(
-                f"Failed to retrieve server tabId for '{next_tab_title}' from batchUpdate response. "
-                f"Full reply: {add_tab_reply}"
+        if not next_tab_id:
+            # Google Docs assigns the tabId when the tab is created.
+            replies = response.get("replies", [])
+            add_tab_reply = next(
+                (r["addDocumentTab"] for r in replies if "addDocumentTab" in r),
+                None,
             )
+            tab_props = add_tab_reply.get("tabProperties", {}) if add_tab_reply else {}
+            new_server_tab_id = tab_props.get("tabId")
 
-        # --- BATCH 2: Populate Session N+1 Content ---
-        batch2_requests = docs_helper.build_tab_content_requests(
-            tab_id=new_server_tab_id,
-            sections=next_sections,
-        )
+            if not new_server_tab_id:
+                raise RuntimeError(
+                    f"Failed to retrieve server tabId for '{next_tab_title}' from batchUpdate response. "
+                    f"Full reply: {add_tab_reply}"
+                )
+            logger.info("Created next-session tab '%s'; writing its content.", next_tab_title)
 
-        docs_helper.execute_batch(
-            docs_service=docs_service,
-            doc_id=doc_id,
-            requests=batch2_requests,
+            batch2_requests = docs_helper.build_tab_content_requests(
+                tab_id=new_server_tab_id,
+                sections=next_sections,
+            )
+            docs_helper.execute_batch(
+                docs_service=docs_service,
+                doc_id=doc_id,
+                requests=batch2_requests,
+            )
+        logger.info(
+            "Google Docs update complete for Session %s and '%s'.",
+            current_num,
+            next_tab_title,
         )
     else:
         logger.warning("docs_service or doc_id missing; skipped Google Docs update.")

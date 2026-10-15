@@ -355,13 +355,21 @@ def parse_hierarchy(raw_tabs: list, doc_title: str, audio_file_name: str) -> dic
 
 def run(docs_service, doc_id: str, audio_file_name: str) -> dict:
     """Entrypoint to fetch and parse document hierarchy directly."""
+    logger.info(f"Fetching Google Docs document '{doc_id}' for audio file '{audio_file_name}'...")
     doc = docs_service.documents().get(documentId=doc_id, includeTabsContent=True).execute()
 
     doc_title = doc.get("title", "Untitled")
     raw_tabs = doc.get("tabs", [])
+    logger.info(f"Fetched document '{doc_title}' with {len(raw_tabs)} top-level tab(s); parsing hierarchy...")
 
     result = parse_hierarchy(raw_tabs, doc_title, audio_file_name)
     result["doc_id"] = doc_id
+    logger.info(
+        f"Inspection complete for '{doc_title}': "
+        f"{len(result['entities_list'])} entities, "
+        f"{len(result['sessions']['items'])} sessions; "
+        f"next session number is {result['sessions_meta']['next_session_num']}."
+    )
 
     # TEMPORARAY DEBUG
     with open("/app/inspector_debug.json", "w", encoding="utf-8") as f:

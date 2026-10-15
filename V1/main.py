@@ -233,7 +233,7 @@ def scan_campaign_folder(drive_service, docs_service, gemini_client, folder_id):
                 audio_file_name=file_name,
             )
 
-            logger.info(f"Watcher active. Polling campaign folders every {CHECK_INTERVAL_SECONDS} second(s)...")
+            logger.info(f"Watcher active. Polling campaign folders every {CHECK_INTERVAL_SECONDS} second(s)...\n")
 
 
 def main():
@@ -243,7 +243,7 @@ def main():
 
     verify_environment()
     drive_service, docs_service, gemini_client = init_services()
-    logger.info(f"Watcher active. Polling campaign folders every {CHECK_INTERVAL_SECONDS} second(s)...")
+    logger.info(f"Watcher active. Polling campaign folders every {CHECK_INTERVAL_SECONDS} second(s)...\n")
 
     while True:
         try:
