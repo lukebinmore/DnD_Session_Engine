@@ -103,6 +103,7 @@ def run(
                 doc_meta=doc_meta,
                 docs_service=docs_service,
                 doc_id=doc_id,
+                session_num=session_num,
             )
             logger.info(f"[{campaign_name}] [STAGE {current_stage}/{stages}] Success.\n")
             current_stage += 1

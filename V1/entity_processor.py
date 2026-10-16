@@ -7,6 +7,10 @@ import docs_helper
 import gemini_helper
 
 logger = logging.getLogger("EntityProcessor")
+SESSION_PREFIX_PATTERN = re.compile(
+    r"^\s*\[?sessions?\s+\d+(?:\s*[-–]\s*\d+)?\]?\s*[:\-–]?\s*",
+    re.IGNORECASE,
+)
 
 ENTITY_PLAN_PROMPT = """You maintain a D&D campaign's collection of entity records.
 
@@ -20,16 +24,21 @@ EXISTING ENTITY UPDATES
 - Return updates only when the Truth Log provides a meaningful, supported change or new fact.
 - Follow each template section's prompt and mode. For a Block section, follow each nested field's mode.
 - Immutable or Don't Change: never update.
-- Static: leave existing values unchanged.
+- Static: leave existing values unchanged, add value for empty fields.
 - Overwrite: return a complete replacement only when the Truth Log clearly changes the value.
 - Append: return only genuinely new information; do not repeat existing information.
-- For append-only section content, add the session number to each new entry when the template asks for it.
+- When a template asks for a session number, use the supplied current session number exactly. Never infer a
+    number from campaign context or use a range of session numbers.
 
 NEW ENTITY TABS
 - Identify clearly named, distinct, reusable entities introduced or materially established in this session.
 - Create a new entity when it has enough supported information to make a useful campaign record, not for a
   generic passing mention. A specifically named location discovered within another location can qualify.
 - Do not return anything already listed among the existing entity titles for this collection.
+- The input includes document-wide unavailable tab titles. Never use one of those titles for a new entity.
+- If a genuinely distinct new entity would otherwise use an unavailable title, choose a concise, factual
+    qualifier based on the Truth Log to make its title distinct. Do not use a collection name as a qualifier.
+- Do not give two proposed new entities the same title, ignoring case and surrounding whitespace.
 - Use the template to structure each new entity. For KeyValueList sections, return an object using the
   template's exact field names. For BulletList sections, return a list of strings. For Paragraph sections,
   return a string. Leave unsupported values empty. Do not populate Immutable or Don't Change sections.
@@ -157,6 +166,23 @@ def _apply_mode(existing, generated, mode, data_type):
     return existing, False
 
 
+def _prefix_session_entries(value, session_num, data_type):
+    if session_num is None:
+        return value
+
+    normalized = _normalize_content(value, data_type)
+
+    def prefix_entry(entry):
+        text = SESSION_PREFIX_PATTERN.sub("", str(entry).strip()).strip()
+        return f"[Session {session_num}] {text}" if text else ""
+
+    if isinstance(normalized, list):
+        return [prefix_entry(entry) for entry in normalized if str(entry).strip()]
+    if isinstance(normalized, str):
+        return "\n".join(prefix_entry(line) for line in normalized.splitlines() if line.strip())
+    return normalized
+
+
 def _template_payload(category):
     template = category.get("template", {})
     return [
@@ -181,11 +207,13 @@ def _template_payload(category):
     ]
 
 
-def _category_payload(category, truth_log):
+def _category_payload(category, truth_log, unavailable_tab_titles, session_num):
     entities = category.get("items", {})
     return {
         "category": category.get("title", "Untitled"),
+        "current_session_number": session_num,
         "truth_log": truth_log,
+        "unavailable_tab_titles": unavailable_tab_titles,
         "template": _template_payload(category),
         "entities": [
             {
@@ -205,11 +233,52 @@ def _category_payload(category, truth_log):
     }
 
 
+def _collect_document_tab_titles(node, titles=None):
+    if titles is None:
+        titles = {}
+
+    if isinstance(node, dict):
+        title = node.get("title")
+        if isinstance(title, str) and title.strip():
+            titles.setdefault(title.strip().casefold(), title.strip())
+        for value in node.values():
+            if isinstance(value, (dict, list)):
+                _collect_document_tab_titles(value, titles)
+    elif isinstance(node, list):
+        for value in node:
+            if isinstance(value, (dict, list)):
+                _collect_document_tab_titles(value, titles)
+
+    return titles
+
+
+def _reserve_unique_tab_title(title, reserved_titles):
+    normalized_title = title.casefold()
+    if normalized_title not in reserved_titles:
+        reserved_titles[normalized_title] = title
+        return title
+
+    suffix = 1
+    while True:
+        tab_title = f"{title} ({suffix})"
+        normalized_tab_title = tab_title.casefold()
+        if normalized_tab_title not in reserved_titles:
+            reserved_titles[normalized_tab_title] = tab_title
+            logger.warning(
+                "Entity title '%s' already exists in the document; using unique tab title '%s'.",
+                title,
+                tab_title,
+            )
+            return tab_title
+        suffix += 1
+
+
 def _request_category_plan(gemini_client, payload):
     category_title = payload["category"]
     user_content = (
         "Produce one combined plan for existing entity updates and new entity tabs in this collection. "
-        "Use only the supplied Truth Log and follow the supplied template.\n\n"
+        "Use only the supplied Truth Log and follow the supplied template. For session-prefixed entries, "
+        "use exactly the supplied current_session_number.\n\n"
         f"{json.dumps(payload, ensure_ascii=False, indent=2)}"
     )
     logger.info(
@@ -254,7 +323,7 @@ def _find_template_section(template_sections, update):
     )
 
 
-def _apply_entity_updates(entity, template_sections, section_updates):
+def _apply_entity_updates(entity, template_sections, section_updates, session_num=None):
     updated_entity = copy.deepcopy(entity)
     sections = updated_entity.get("sections", [])
     changed = False
@@ -331,12 +400,23 @@ def _apply_entity_updates(entity, template_sections, section_updates):
         if normalized_mode in {"static", "immutable", "don't change"}:
             continue
         if normalized_mode == "block":
-            logger.warning("Block section '%s' has no key-value fields; skipping update.", template_section.get("heading"))
+            logger.warning(
+                "Block section '%s' has no key-value fields; skipping update.", template_section.get("heading")
+            )
             continue
+
+        generated_content = update.get("content")
+        section_prompt = str(template_section.get("prompt", "")).casefold()
+        if normalized_mode == "append" and "session number" in section_prompt:
+            generated_content = _prefix_session_entries(
+                generated_content,
+                session_num,
+                template_section.get("type"),
+            )
 
         new_content, did_change = _apply_mode(
             entity_section.get("content"),
-            update.get("content"),
+            generated_content,
             field_mode,
             template_section.get("type"),
         )
@@ -362,7 +442,7 @@ def _as_text(value):
     return str(value).strip() if value is not None else ""
 
 
-def _created_section_content(template_section, generated_section):
+def _created_section_content(template_section, generated_section, session_num=None):
     section_type = _doc_section_type(template_section.get("type"))
     mode = str(template_section.get("mode") or "").replace("’", "'").strip().casefold()
     generated_content = generated_section.get("content") if generated_section else None
@@ -386,15 +466,24 @@ def _created_section_content(template_section, generated_section):
             normalized_values[field_name] = _as_text(generated_values.get(generated_field)) if generated_field else ""
         return normalized_values
     if section_type == "bullet_list":
+        requires_session_prefix = (
+            mode == "append" and "session number" in str(template_section.get("prompt", "")).casefold()
+        )
         if isinstance(generated_content, list):
-            return [str(item).strip() for item in generated_content if str(item).strip()]
+            normalized_content = [str(item).strip() for item in generated_content if str(item).strip()]
+            if requires_session_prefix:
+                return _prefix_session_entries(normalized_content, session_num, template_section.get("type"))
+            return normalized_content
         if isinstance(generated_content, str):
-            return [line.strip("- *\t").strip() for line in generated_content.splitlines() if line.strip()]
+            normalized_content = [line.strip("- *\t").strip() for line in generated_content.splitlines() if line.strip()]
+            if requires_session_prefix:
+                return _prefix_session_entries(normalized_content, session_num, template_section.get("type"))
+            return normalized_content
         return []
     return _as_text(generated_content)
 
 
-def _build_new_entity_sections(entity_data, template_sections):
+def _build_new_entity_sections(entity_data, template_sections, session_num=None):
     title = str(entity_data.get("title", "")).strip()
     generated_sections = entity_data.get("sections", [])
     if not isinstance(generated_sections, list):
@@ -417,18 +506,28 @@ def _build_new_entity_sections(entity_data, template_sections):
                 "tag": template_section.get("tag"),
                 "style": template_section.get("style", "HEADING_1"),
                 "type": _doc_section_type(template_section.get("type")),
-                "content": _created_section_content(template_section, generated_section),
+                "content": _created_section_content(template_section, generated_section, session_num),
             }
         )
     return sections
 
 
-def run(gemini_client, truth_log, doc_meta, docs_service=None, doc_id=None, **kwargs):
+def run(gemini_client, truth_log, doc_meta, docs_service=None, doc_id=None, session_num=None, **kwargs):
     """Plans, updates, and creates collection entities from one Gemini call per category."""
     collections = doc_meta.get("collections", {}).get("items", {})
     categories_processed = 0
     pending_updates = []
     pending_creations = []
+    reserved_tab_titles = _collect_document_tab_titles(doc_meta)
+    if session_num is None:
+        session_num = doc_meta.get("sessions_meta", {}).get("latest_session_num")
+    if session_num == 0:
+        session_num = None
+
+    if session_num is not None:
+        logger.info(f"Using Session {session_num} for session-numbered entity entries.")
+    else:
+        logger.warning("No current session number is available for session-numbered entity entries.")
 
     logger.info(f"Processing {len(collections)} entity collection categor(ies).")
 
@@ -441,13 +540,13 @@ def run(gemini_client, truth_log, doc_meta, docs_service=None, doc_id=None, **kw
 
         entities = category.get("items", {})
         template_sections = template.get("sections", [])
-        payload = _category_payload(category, truth_log)
+        unavailable_titles = sorted(reserved_tab_titles.values(), key=str.casefold)
+        payload = _category_payload(category, truth_log, unavailable_titles, session_num)
         category_updates, category_creations = _request_category_plan(gemini_client, payload)
         categories_processed += 1
 
         entities_by_title = {
-            str(entity.get("title", title)).strip().casefold(): entity
-            for title, entity in entities.items()
+            str(entity.get("title", title)).strip().casefold(): entity for title, entity in entities.items()
         }
         for entity_update in category_updates:
             if not isinstance(entity_update, dict):
@@ -465,7 +564,7 @@ def run(gemini_client, truth_log, doc_meta, docs_service=None, doc_id=None, **kw
                 logger.warning("Ignoring malformed section updates for entity '%s'.", entity_title)
                 continue
 
-            updated_entity = _apply_entity_updates(entity, template_sections, section_updates)
+            updated_entity = _apply_entity_updates(entity, template_sections, section_updates, session_num)
             if updated_entity:
                 pending_updates.append((category_title, entity_title, updated_entity))
 
@@ -489,12 +588,14 @@ def run(gemini_client, truth_log, doc_meta, docs_service=None, doc_id=None, **kw
                 continue
 
             existing_titles.add(normalized_title)
+            tab_title = _reserve_unique_tab_title(entity_title, reserved_tab_titles)
             pending_creations.append(
                 {
                     "category": category_title,
                     "parent_tab_id": parent_tab_id,
                     "title": entity_title,
-                    "sections": _build_new_entity_sections(entity_data, template_sections),
+                    "tab_title": tab_title,
+                    "sections": _build_new_entity_sections(entity_data, template_sections, session_num),
                 }
             )
 
@@ -504,16 +605,13 @@ def run(gemini_client, truth_log, doc_meta, docs_service=None, doc_id=None, **kw
         if not tab_id:
             raise ValueError(f"Cannot update entity '{entity_title}' in '{category_title}': tabId is missing.")
 
-        update_requests.extend(
-            docs_helper.build_clear_tab_request(tab_id=tab_id, end_index=entity.get("end_index", 1))
-        )
+        update_requests.extend(docs_helper.build_clear_tab_request(tab_id=tab_id, end_index=entity.get("end_index", 1)))
         update_requests.extend(
             docs_helper.build_tab_content_requests(tab_id=tab_id, sections=entity.get("sections", []))
         )
 
     add_requests = [
-        docs_helper.build_add_tab_request(entity["title"], entity["parent_tab_id"])
-        for entity in pending_creations
+        docs_helper.build_add_tab_request(entity["tab_title"], entity["parent_tab_id"]) for entity in pending_creations
     ]
     first_batch_requests = update_requests + add_requests
     created_entities = []
@@ -548,7 +646,13 @@ def run(gemini_client, truth_log, doc_meta, docs_service=None, doc_id=None, **kw
                 content_requests.extend(
                     docs_helper.build_tab_content_requests(tab_id=tab_id, sections=entity["sections"])
                 )
-                created_entities.append({"category": entity["category"], "title": entity["title"]})
+                created_entities.append(
+                    {
+                        "category": entity["category"],
+                        "title": entity["title"],
+                        "tab_title": entity["tab_title"],
+                    }
+                )
 
             if content_requests:
                 logger.info(f"Populating {len(created_entities)} new entity tab(s) in one Google Docs batch.")
@@ -562,8 +666,10 @@ def run(gemini_client, truth_log, doc_meta, docs_service=None, doc_id=None, **kw
         "categories_processed": categories_processed,
         "entities_updated": entities_updated,
         "entities_created": len(created_entities),
-        "updated_entities": [
-            {"category": category, "title": title} for category, title, _ in pending_updates
-        ] if entities_updated else [],
+        "updated_entities": (
+            [{"category": category, "title": title} for category, title, _ in pending_updates]
+            if entities_updated
+            else []
+        ),
         "created_entities": created_entities,
     }

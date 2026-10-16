@@ -206,12 +206,10 @@ def parse_tab_sections(content: list) -> list:
                 }
 
             if is_bullet:
-                # Check for "Key: Value" formatting
-                kv_item = parse_entity_kv_item(cleaned_text)
-                if kv_item and current_sec["type"] in [
-                    "paragraph",
-                    "key_value_list",
-                ]:
+                # Details is the template's key-value section; narrative bullets may contain colons.
+                is_details_section = current_sec["heading"].strip().rstrip(":").casefold() == "details"
+                kv_item = parse_entity_kv_item(cleaned_text) if is_details_section else None
+                if kv_item:
                     current_sec["type"] = "key_value_list"
                     if not isinstance(current_sec["content"], dict):
                         current_sec["content"] = {}

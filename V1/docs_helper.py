@@ -7,7 +7,11 @@ def build_clear_tab_request(tab_id: str, end_index: int) -> list:
     """Builds a request to wipe all content from a tab if it has existing text."""
     # A completely blank tab has end_index <= 2 (just index 0 and a trailing newline \n)
     if end_index and end_index > 2:
-        return [{"deleteContentRange": {"range": {"tabId": tab_id, "startIndex": 1, "endIndex": end_index - 1}}}]
+        content_range = {"tabId": tab_id, "startIndex": 1, "endIndex": end_index - 1}
+        return [
+            {"deleteParagraphBullets": {"range": content_range}},
+            {"deleteContentRange": {"range": content_range}},
+        ]
     return []
 
 
@@ -74,7 +78,7 @@ def build_tab_content_requests(tab_id: str, sections: list) -> list:
                 list_end = current_idx
 
                 style_ranges.append({"start": list_start, "end": list_end, "style": "NORMAL_TEXT"})
-                bullet_ranges.append({"start": list_start, "end": list_end})
+                bullet_ranges.append({"start": list_start, "end": list_end - 1})
 
         elif sec_type == "bullet_list":
             if isinstance(content, str):
@@ -93,7 +97,7 @@ def build_tab_content_requests(tab_id: str, sections: list) -> list:
                 list_end = current_idx
 
                 style_ranges.append({"start": list_start, "end": list_end, "style": "NORMAL_TEXT"})
-                bullet_ranges.append({"start": list_start, "end": list_end})
+                bullet_ranges.append({"start": list_start, "end": list_end - 1})
 
         elif sec_type == "paragraph":
             text_str = str(content).strip() if content else ""
@@ -113,6 +117,7 @@ def build_tab_content_requests(tab_id: str, sections: list) -> list:
 
     # A: Insert all text at index 1
     requests.append({"insertText": {"location": {"tabId": tab_id, "index": 1}, "text": full_text}})
+    requests.append({"deleteParagraphBullets": {"range": {"tabId": tab_id, "startIndex": 1, "endIndex": current_idx}}})
 
     total_doc_end = 1 + len(full_text)
 
