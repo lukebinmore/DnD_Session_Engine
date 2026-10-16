@@ -4,16 +4,14 @@ import file_helper
 import inspector
 import truth_log
 import session_creator
-import entity_updater
-import entity_creator
+import entity_processor
 
 # Force reload modules if running in a persistent daemon/watcher container
 importlib.reload(file_helper)
 importlib.reload(inspector)
 importlib.reload(truth_log)
 importlib.reload(session_creator)
-importlib.reload(entity_updater)
-importlib.reload(entity_creator)
+importlib.reload(entity_processor)
 
 logger = logging.getLogger("Pipeline")
 
@@ -95,26 +93,11 @@ def run(
             current_stage += 1
 
         # =====================================================================
-        # Entity Reconciliation & Ledger (Delta Extraction)
+        # Entity Updates and Creation
         # =====================================================================
         if True:
-            logger.info(f"[{campaign_name}] [STAGE {current_stage}/{stages}] Starting Entity Updates...")
-            entity_results = entity_updater.run(
-                gemini_client=gemini_client,
-                truth_log=truth_log_text,
-                doc_meta=doc_meta,
-                docs_service=docs_service,
-                doc_id=doc_id,
-            )
-            logger.info(f"[{campaign_name}] [STAGE {current_stage}/{stages}] Success.\n")
-            current_stage += 1
-
-        # =====================================================================
-        # New Entity Creation
-        # =====================================================================
-        if True:
-            logger.info(f"[{campaign_name}] [STAGE {current_stage}/{stages}] Starting Entity Creation...")
-            entity_results = entity_creator.run(
+            logger.info(f"[{campaign_name}] [STAGE {current_stage}/{stages}] Starting Entity Processing...")
+            entity_results = entity_processor.run(
                 gemini_client=gemini_client,
                 truth_log=truth_log_text,
                 doc_meta=doc_meta,

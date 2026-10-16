@@ -45,8 +45,7 @@ PIPELINE_MODULES = [
     "inspector",
     "truth_log",
     "session_creator",
-    "entity_creator",
-    "entity_updater",
+    "entity_processor",
     "tab_linker",
 ]
 
