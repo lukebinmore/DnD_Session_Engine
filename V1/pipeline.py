@@ -27,7 +27,7 @@ def run(
     **kwargs,
 ):
     """Orchestrates the 6-stage D&D campaign documentation pipeline."""
-    stages = 6
+    stages = 5
     current_stage = 1
 
     logger.info("------------------------------------------------------------")
@@ -43,7 +43,12 @@ def run(
                 f"[{campaign_name}] [STAGE {current_stage}/{stages}] Inspecting document structure & templates..."
             )
             doc_meta = inspector.run(docs_service=docs_service, doc_id=doc_id, audio_file_name=audio_file_name)
+            session_num = doc_meta.get("sessions_meta", {}).get("latest_session_num", 1)
             known_tabs = doc_meta.get("entities_list", [])
+            previous_session_summary = session_creator.get_previous_session_summary(doc_meta, session_num)
+            logger.info(
+                f"Loaded {len(previous_session_summary)} characters of prior session notes for Session {session_num}."
+            )
             logger.info(f"[{campaign_name}] [STAGE {current_stage}/{stages}] Success.\n")
             current_stage += 1
 
@@ -52,7 +57,6 @@ def run(
         # =====================================================================
         if True:
             logger.info(f"[{campaign_name}] [Stage {current_stage}/{stages}] Storing session number in file name...")
-            session_num = doc_meta.get("sessions_meta", {}).get("latest_session_num", 1)
             audio_file_name = file_helper.mark_file_session(drive_service, audio_file_id, audio_file_name, session_num)
             logger.info(f"[{campaign_name}] [STAGE {current_stage}/{stages}] Success.\n")
             current_stage += 1
@@ -70,6 +74,8 @@ def run(
                 audio_file_id=audio_file_id,
                 audio_file_name=audio_file_name,
                 known_tabs=known_tabs,
+                previous_summary=previous_session_summary,
+                session_num=session_num,
                 cache_dir="/app/truth_logs",
             )
             logger.info(f"[{campaign_name}] [STAGE {current_stage}/{stages}] Success.\n")
@@ -88,6 +94,7 @@ def run(
                 doc_id=doc_id,
                 doc_meta=doc_meta,
                 truth_log=truth_log_text,
+                previous_summary=previous_session_summary,
             )
             logger.info(f"[{campaign_name}] [STAGE {current_stage}/{stages}] Success.\n")
             current_stage += 1
@@ -104,15 +111,8 @@ def run(
                 docs_service=docs_service,
                 doc_id=doc_id,
                 session_num=session_num,
+                previous_summary=previous_session_summary,
             )
-            logger.info(f"[{campaign_name}] [STAGE {current_stage}/{stages}] Success.\n")
-            current_stage += 1
-
-        # =====================================================================
-        # Hyperlinking & Formatting Cleanup
-        # =====================================================================
-        if False:
-            logger.info(f"[{campaign_name}] [STAGE {current_stage}/{stages}] ...")
             logger.info(f"[{campaign_name}] [STAGE {current_stage}/{stages}] Success.\n")
             current_stage += 1
 

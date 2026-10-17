@@ -18,8 +18,14 @@ Your goal is to synthesize this into structured session notes across 5 specific 
 1. session_name: A name that suits the theme of the session.
 2. ai_ideas_for_session: 3-5 concrete DM prep hooks, lingering questions, complications for the next game or ideas for the next sessions plot.
 3. previous_notes_summary: A 1-2 paragraph cinematic recap of the session.
-4. session_notes: High-level narrative bullet points highlighting major plot beats, key NPC encounters, and critical party decisions.
+4. session_notes: A compact, cumulative campaign-state summary for continuity in future sessions.
 5. chronological_history: A polished, verbose, readable narrative timeline of what occurred during the session as chronological bullet points.
+
+For session_notes, carry forward relevant facts from the prior session notes and update them using only this
+session's Truth Log. Preserve ongoing locations, party goals and whereabouts, important relationships, active
+threats, unresolved mysteries, and other state needed for continuity. Update or remove facts that this session
+changes or resolves. Keep it bounded to roughly 500 words; this is a current-state reference, not a second
+chronological history. Do not present prior events as if they happened in the current session.
 
 Return strictly a JSON object with this exact shape:
 {
@@ -66,6 +72,35 @@ def get_sections_map(sections_list: list) -> dict:
         heading_key = s.get("heading", "").strip().lower()
         sec_map[heading_key] = s.get("content", "")
     return sec_map
+
+
+def _summary_text(content):
+    if isinstance(content, list):
+        return "\n".join(f"- {item}" for item in content if str(item).strip())
+    if isinstance(content, dict):
+        return "\n".join(f"- {key}: {value}" for key, value in content.items() if str(value).strip())
+    return str(content or "").strip()
+
+
+def get_previous_session_summary(doc_meta, current_num):
+    """Returns Session Notes from the closest existing session before current_num."""
+    sessions_node = doc_meta.get("sessions", {})
+    earlier_numbers = []
+    for title in sessions_node.get("items", {}):
+        match = SESSION_TITLE_PATTERN.match(title)
+        if match:
+            number = int(match.group(1))
+            if number < current_num:
+                earlier_numbers.append(number)
+
+    if not earlier_numbers:
+        return ""
+
+    previous_num = max(earlier_numbers)
+    _, previous_session = find_session_item(sessions_node, previous_num)
+    previous_sections = get_sections_map(previous_session.get("sections", [])) if previous_session else {}
+    summary = previous_sections.get("session notes") or previous_sections.get("previous notes summary", "")
+    return _summary_text(summary)
 
 
 def find_session_item(sessions_node, session_num):
@@ -186,7 +221,7 @@ def build_next_session_payload(doc_meta, next_num, session_data):
     return tab_id, end_index, tab_title, sections
 
 
-def run(gemini_client, truth_log, doc_meta, docs_service=None, doc_id=None, **kwargs):
+def run(gemini_client, truth_log, doc_meta, docs_service=None, doc_id=None, previous_summary=None, **kwargs):
     """Synthesizes notes and executes an atomic batch update in Google Docs:
     1. Wipes and writes retrospective notes for Session N.
     2. Updates Session N+1 if it exists, otherwise creates it.
@@ -196,30 +231,28 @@ def run(gemini_client, truth_log, doc_meta, docs_service=None, doc_id=None, **kw
     # 1. Determine active and upcoming session numbers
     current_num = doc_meta.get("sessions_meta", {}).get("latest_session_num", 1)
     next_num = doc_meta.get("sessions_meta", {}).get("next_session_num", 2)
+    current_tab_title, _ = find_session_item(sessions_node, current_num)
+    current_tab_title = current_tab_title or f"Session {current_num}"
     logger.info(
         "Preparing session update: Session %s is current; Session %s is next.",
         current_num,
         next_num,
     )
 
-    # 2. Extract recap/summary context from the current session tab
-    tab_title, current_session = find_session_item(sessions_node, current_num)
-    if current_session:
-        logger.info("Found current session tab '%s' for update.", tab_title)
-    else:
-        logger.warning("Could not find current session tab for Session %s while preparing context.", current_num)
-
-    sections_map = get_sections_map(current_session.get("sections", [])) if current_session else {}
-
-    current_summary_context = sections_map.get("previous notes summary") or sections_map.get("session notes") or ""
-    if isinstance(current_summary_context, list):
-        current_summary_context = "\n".join(f"- {item}" for item in current_summary_context)
+    # 2. Use the previous session's rolling notes as continuity context.
+    if previous_summary is None:
+        previous_summary = get_previous_session_summary(doc_meta, current_num)
+    logger.info(
+        "Using %s characters of previous-session context for Session %s.",
+        len(previous_summary),
+        current_num,
+    )
 
     # 3. Synthesize fresh session content via Gemini
     session_data = synthesize_session_content(
         gemini_client=gemini_client,
         truth_log=truth_log,
-        previous_summary=current_summary_context,
+        previous_summary=previous_summary,
     )
 
     # 4. Build section data structures for both tabs
@@ -323,7 +356,7 @@ def run(gemini_client, truth_log, doc_meta, docs_service=None, doc_id=None, **kw
 
     # Placed at the very end of session_creator.run():
     return {
-        "tab_title": f"{tab_title} & {next_tab_title}",
+        "tab_title": f"{current_tab_title} & {next_tab_title}",
         "current_session_num": current_num,
         "next_session_num": next_num,
         "data": session_data,

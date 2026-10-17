@@ -19,6 +19,8 @@ combined plan: updates to existing entities and new entities that deserve their 
 
 Only use facts supported by the Truth Log. Never invent details, infer hidden thoughts, or transfer facts
 between entities. Keep each entity independent and use exact existing titles when referring to existing tabs.
+Use Previous Session Notes only to resolve references and understand ongoing context. Do not create updates or
+new entities from historical context alone; changes must be supported by the current Truth Log.
 
 EXISTING ENTITY UPDATES
 - Return updates only when the Truth Log provides a meaningful, supported change or new fact.
@@ -207,11 +209,12 @@ def _template_payload(category):
     ]
 
 
-def _category_payload(category, truth_log, unavailable_tab_titles, session_num):
+def _category_payload(category, truth_log, unavailable_tab_titles, session_num, previous_summary):
     entities = category.get("items", {})
     return {
         "category": category.get("title", "Untitled"),
         "current_session_number": session_num,
+        "previous_session_notes": previous_summary,
         "truth_log": truth_log,
         "unavailable_tab_titles": unavailable_tab_titles,
         "template": _template_payload(category),
@@ -323,6 +326,50 @@ def _find_template_section(template_sections, update):
     )
 
 
+def _normalize_entity_section_types(sections, template_sections):
+    changed = False
+    for entity_section in sections:
+        template_section = next(
+            (section for section in template_sections if _same_tag_or_heading(entity_section, section)),
+            None,
+        )
+        if not template_section:
+            continue
+
+        template_type = str(template_section.get("type") or "").replace("_", "").casefold()
+        template_mode = str(template_section.get("mode") or "").replace("’", "'").strip().casefold()
+        if template_type == "immutable" or template_mode in {"immutable", "don't change"}:
+            continue
+
+        section_type = _doc_section_type(template_section.get("type"))
+        content = entity_section.get("content")
+        original_type = entity_section.get("type")
+        original_content = copy.deepcopy(content)
+        if section_type == "bullet_list":
+            entity_section["content"] = _normalize_content(content, "BulletList")
+        elif section_type == "key_value_list" and not isinstance(content, dict):
+            expected_fields = {
+                _normalize_heading(value.get("heading")): value.get("heading", "")
+                for value in template_section.get("values", [])
+            }
+            normalized_content = {field_name: "" for field_name in expected_fields.values()}
+            lines = content.splitlines() if isinstance(content, str) else content if isinstance(content, list) else []
+            for line in lines:
+                key, separator, value = str(line).partition(":")
+                normalized_key = _normalize_heading(key)
+                if separator and normalized_key in expected_fields:
+                    normalized_content[expected_fields[normalized_key]] = value.strip()
+            entity_section["content"] = normalized_content
+        elif section_type == "paragraph":
+            entity_section["content"] = _normalize_content(content, "Paragraph")
+
+        entity_section["type"] = section_type
+        if entity_section["type"] != original_type or entity_section.get("content") != original_content:
+            changed = True
+
+    return changed
+
+
 def _apply_entity_updates(entity, template_sections, section_updates, session_num=None):
     updated_entity = copy.deepcopy(entity)
     sections = updated_entity.get("sections", [])
@@ -424,7 +471,11 @@ def _apply_entity_updates(entity, template_sections, section_updates, session_nu
             entity_section["content"] = new_content
             changed = True
 
-    return updated_entity if changed else None
+    normalization_changed = _normalize_entity_section_types(sections, template_sections)
+    if not changed and not normalization_changed:
+        return None
+
+    return updated_entity
 
 
 def _doc_section_type(template_type):
@@ -475,7 +526,9 @@ def _created_section_content(template_section, generated_section, session_num=No
                 return _prefix_session_entries(normalized_content, session_num, template_section.get("type"))
             return normalized_content
         if isinstance(generated_content, str):
-            normalized_content = [line.strip("- *\t").strip() for line in generated_content.splitlines() if line.strip()]
+            normalized_content = [
+                line.strip("- *\t").strip() for line in generated_content.splitlines() if line.strip()
+            ]
             if requires_session_prefix:
                 return _prefix_session_entries(normalized_content, session_num, template_section.get("type"))
             return normalized_content
@@ -512,7 +565,16 @@ def _build_new_entity_sections(entity_data, template_sections, session_num=None)
     return sections
 
 
-def run(gemini_client, truth_log, doc_meta, docs_service=None, doc_id=None, session_num=None, **kwargs):
+def run(
+    gemini_client,
+    truth_log,
+    doc_meta,
+    docs_service=None,
+    doc_id=None,
+    session_num=None,
+    previous_summary="",
+    **kwargs,
+):
     """Plans, updates, and creates collection entities from one Gemini call per category."""
     collections = doc_meta.get("collections", {}).get("items", {})
     categories_processed = 0
@@ -541,7 +603,13 @@ def run(gemini_client, truth_log, doc_meta, docs_service=None, doc_id=None, sess
         entities = category.get("items", {})
         template_sections = template.get("sections", [])
         unavailable_titles = sorted(reserved_tab_titles.values(), key=str.casefold)
-        payload = _category_payload(category, truth_log, unavailable_titles, session_num)
+        payload = _category_payload(
+            category,
+            truth_log,
+            unavailable_titles,
+            session_num,
+            previous_summary,
+        )
         category_updates, category_creations = _request_category_plan(gemini_client, payload)
         categories_processed += 1
 

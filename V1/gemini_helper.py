@@ -3,8 +3,18 @@ import os
 import time
 
 from google.genai.errors import ServerError, APIError
+from google.genai import types
 
 logger = logging.getLogger("GeminiHelper")
+
+
+def _is_rate_limit_error(error):
+    status_code = getattr(error, "code", None) or getattr(error, "status_code", None)
+    if status_code == 429 or str(status_code) == "429":
+        return True
+
+    error_text = str(error).upper()
+    return "429" in error_text or "RESOURCE_EXHAUSTED" in error_text
 
 
 def generate_with_fallback(
@@ -19,6 +29,8 @@ def generate_with_fallback(
     and falls back through the model ladder if a model remains unavailable.
     """
     candidates = os.environ.get("GEMINI_MODEL", "").strip().split(",")
+    request_config = dict(config)
+    request_config["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
     logger.info(
         f"Starting Gemini generation with {len(candidates)} model candidate(s), "
         f"up to {max_retries_per_model} attempt(s) each."
@@ -31,11 +43,12 @@ def generate_with_fallback(
         logger.info(f"Trying Gemini model '{model}'.")
 
         for attempt in range(1, max_retries_per_model + 1):
+            logger.info(f"Sending Gemini request to '{model}' (attempt {attempt}/{max_retries_per_model}).")
             try:
                 response = gemini_client.models.generate_content(
                     model=model,
                     contents=contents,
-                    config=config,
+                    config=request_config,
                 )
                 logger.info(
                     f"Gemini generation succeeded with model '{model}' "
@@ -46,7 +59,14 @@ def generate_with_fallback(
             except (ServerError, APIError) as e:
                 err_str = str(e)
                 last_error = e
-                is_transient = any(code in err_str for code in ["503", "UNAVAILABLE", "429"])
+                if _is_rate_limit_error(e):
+                    logger.warning(
+                        f"Gemini model '{model}' is rate-limited; skipping remaining retries and "
+                        "trying the next model."
+                    )
+                    break
+
+                is_transient = any(code in err_str for code in ["503", "UNAVAILABLE"])
 
                 if is_transient and attempt < max_retries_per_model:
                     logger.warning(
@@ -54,11 +74,13 @@ def generate_with_fallback(
                         f"{attempt}/{max_retries_per_model}; retrying in {delay}s."
                     )
                     time.sleep(delay)
+                    logger.info(
+                        f"Retrying Gemini model '{model}' now " f"(attempt {attempt + 1}/{max_retries_per_model})."
+                    )
                     delay *= 2
                 elif is_transient:
                     logger.warning(
-                        f"Transient Gemini errors exhausted retries for model '{model}'; "
-                        "trying the next model."
+                        f"Transient Gemini errors exhausted retries for model '{model}'; " "trying the next model."
                     )
                     continue
                 else:

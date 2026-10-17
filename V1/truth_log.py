@@ -1,4 +1,6 @@
 import os
+import hashlib
+import json
 import tempfile
 import time
 import logging
@@ -90,6 +92,8 @@ def run(
     audio_file_id,
     audio_file_name,
     known_tabs=None,
+    previous_summary=None,
+    session_num=None,
     cache_dir="/app/truth_logs",
     **kwargs,
 ):
@@ -98,10 +102,25 @@ def run(
     Uses model from environment variable/caller, falling back dynamically if busy.
     """
     known_tabs = known_tabs or []
+    previous_summary = previous_summary or ""
 
     # 1. Local Cache Check: Skip download and API call if already processed
     os.makedirs(cache_dir, exist_ok=True)
-    cache_file = os.path.join(cache_dir, f"{os.path.splitext(audio_file_name)[0]}_truth.txt")
+    cache_context = json.dumps(
+        {
+            "version": 2,
+            "session_num": session_num,
+            "known_tabs": known_tabs,
+            "previous_summary": previous_summary,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    cache_key = hashlib.sha256(cache_context.encode("utf-8")).hexdigest()[:12]
+    cache_file = os.path.join(
+        cache_dir,
+        f"{os.path.splitext(audio_file_name)[0]}_truth_{cache_key}.txt",
+    )
     if os.path.exists(cache_file):
         logger.info(f"Using cached truth log for '{audio_file_name}'.")
         with open(cache_file, "r", encoding="utf-8") as f:
@@ -146,10 +165,17 @@ def run(
         known_entities_str = ", ".join(known_tabs) if known_tabs else "None provided yet."
         user_prompt = f"""Process this session audio file ('{audio_file_name}') into the chronological Play-by-Play Truth Log.
 
+Current session number: {session_num if session_num is not None else 'Unknown'}
+
+Previous Session Notes (historical context only; do not report these as current events unless they happen again in the audio):
+{previous_summary or 'No previous session notes available.'}
+
 Known Campaign Entities (use exact spelling where applicable):
 {known_entities_str}
 
-Capture initial vocal characterizations under [Voice: ...] rules, ignoring subsequent accent drops."""
+Use the previous notes only to resolve references and understand ongoing context. The Truth Log must describe
+events from this recording only. Capture initial vocal characterizations under [Voice: ...] rules, ignoring
+subsequent accent drops."""
 
         # 6. Execute generation with dynamic retry and fallback
         logger.info(f"Generating truth log for '{audio_file_name}'...")

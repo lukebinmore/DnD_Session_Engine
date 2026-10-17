@@ -160,6 +160,93 @@ def build_add_tab_request(title: str, parent_tab_id: str = None) -> dict:
     return {"addDocumentTab": {"tabProperties": tab_props}}
 
 
+def _extract_document_text(value):
+    if isinstance(value, list):
+        return "".join(_extract_document_text(item) for item in value)
+    if isinstance(value, dict):
+        text_run = value.get("textRun")
+        if isinstance(text_run, dict):
+            return text_run.get("content", "")
+        return "".join(_extract_document_text(item) for item in value.values())
+    return ""
+
+
+def _iter_document_tabs(tabs):
+    for tab in tabs or []:
+        properties = tab.get("tabProperties", {})
+        document_tab = tab.get("documentTab", {})
+        body = document_tab.get("body", {})
+        yield {
+            "tab_id": properties.get("tabId"),
+            "title": properties.get("title", ""),
+            "parent_tab_id": properties.get("parentTabId"),
+            "text": _extract_document_text(body.get("content", [])),
+        }
+        yield from _iter_document_tabs(tab.get("childTabs", []))
+
+
+def _is_ambiguous_transport_error(error):
+    if isinstance(error, OSError):
+        return True
+    response = getattr(error, "resp", None)
+    return getattr(response, "status", None) in {408, 500, 502, 503, 504}
+
+
+def _reconcile_batch(docs_service, doc_id, requests):
+    document = docs_service.documents().get(documentId=doc_id, includeTabsContent=True).execute()
+    tabs = list(_iter_document_tabs(document.get("tabs", [])))
+    tabs_by_id = {tab["tab_id"]: tab for tab in tabs if tab.get("tab_id")}
+    tabs_by_title = {}
+    for tab in tabs:
+        tabs_by_title.setdefault(tab.get("title", "").casefold(), []).append(tab)
+
+    checks = []
+    add_requests = []
+    for request in requests:
+        insert = request.get("insertText")
+        if insert:
+            location = insert.get("location", {})
+            tab = tabs_by_id.get(location.get("tabId"))
+            expected_text = insert.get("text", "")
+            checks.append(bool(tab and tab["text"].startswith(expected_text)))
+
+        add_tab = request.get("addDocumentTab")
+        if add_tab:
+            properties = add_tab.get("tabProperties", {})
+            title = str(properties.get("title", ""))
+            parent_tab_id = properties.get("parentTabId")
+            matching_tabs = [
+                tab
+                for tab in tabs_by_title.get(title.casefold(), [])
+                if parent_tab_id is None or tab.get("parent_tab_id") == parent_tab_id
+            ]
+            checks.append(bool(matching_tabs))
+            add_requests.append((properties, matching_tabs))
+
+    if not checks:
+        return "unknown", None
+    if all(checks):
+        replies = [
+            {
+                "addDocumentTab": {
+                    "tabProperties": {
+                        **properties,
+                        "tabId": matching_tabs[0].get("tab_id"),
+                    }
+                }
+            }
+            for properties, matching_tabs in add_requests
+        ]
+        return "applied", {"replies": replies}
+    if not any(checks):
+        return "not_applied", None
+    return "mixed", None
+
+
+def _execute_batch_request(docs_service, doc_id, requests):
+    return docs_service.documents().batchUpdate(documentId=doc_id, body={"requests": requests}).execute()
+
+
 def execute_batch(docs_service, doc_id: str, requests: list):
     """Executes a list of Google Docs API requests in a single atomic batchUpdate.
     If any request in the batch fails, the entire transaction rolls back.
@@ -170,10 +257,47 @@ def execute_batch(docs_service, doc_id: str, requests: list):
 
     logger.info("Submitting %s Google Docs request(s) for document '%s'.", len(requests), doc_id)
     try:
-        response = docs_service.documents().batchUpdate(documentId=doc_id, body={"requests": requests}).execute()
-    except Exception:
-        logger.exception("Google Docs batch update failed for document '%s'.", doc_id)
-        raise
+        response = _execute_batch_request(docs_service, doc_id, requests)
+    except Exception as error:
+        if not _is_ambiguous_transport_error(error):
+            logger.exception("Google Docs batch update failed for document '%s'.", doc_id)
+            raise
+
+        logger.warning(
+            "Google Docs batch response was lost for document '%s'; checking whether the batch applied.",
+            doc_id,
+        )
+        try:
+            state, reconciled_response = _reconcile_batch(docs_service, doc_id, requests)
+        except Exception as reconcile_error:
+            raise RuntimeError(
+                f"Google Docs batch outcome is unknown for document '{doc_id}'; "
+                "could not re-fetch the document to verify it."
+            ) from reconcile_error
+
+        if state == "applied":
+            logger.warning("Google Docs batch was applied despite the lost response; continuing.")
+            response = reconciled_response
+        elif state == "not_applied":
+            logger.warning("Google Docs batch was not applied; retrying it once.")
+            try:
+                response = _execute_batch_request(docs_service, doc_id, requests)
+            except Exception as retry_error:
+                if not _is_ambiguous_transport_error(retry_error):
+                    logger.exception("Google Docs batch retry failed for document '%s'.", doc_id)
+                    raise
+                retry_state, retry_response = _reconcile_batch(docs_service, doc_id, requests)
+                if retry_state != "applied":
+                    raise RuntimeError(
+                        f"Google Docs batch outcome remains {retry_state} after one retry for document '{doc_id}'."
+                    ) from retry_error
+                logger.warning("Google Docs batch retry was applied despite the lost response; continuing.")
+                response = retry_response
+        else:
+            raise RuntimeError(
+                f"Google Docs batch outcome is mixed for document '{doc_id}'; "
+                "not retrying to avoid duplicate text or tabs."
+            ) from error
 
     reply_count = len(response.get("replies", [])) if isinstance(response, dict) else 0
     logger.info(
