@@ -27,7 +27,7 @@ def run(
     **kwargs,
 ):
     """Orchestrates the 6-stage D&D campaign documentation pipeline."""
-    stages = 5
+    stages = 6
     current_stage = 1
 
     logger.info("------------------------------------------------------------")

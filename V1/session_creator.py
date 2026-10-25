@@ -17,7 +17,7 @@ Your goal is to synthesize this into structured session notes across 5 specific 
 
 1. session_name: A name that suits the theme of the session.
 2. ai_ideas_for_session: 3-5 concrete DM prep hooks, lingering questions, complications for the next game or ideas for the next sessions plot.
-3. previous_notes_summary: A 1-2 paragraph cinematic recap of the session.
+3. previous_notes_summary: A 1 paragraph quick recap of the session, starting with 'Last time on Aetheria Bound...', ending with 'You are currently...'.
 4. session_notes: A compact, cumulative campaign-state summary for continuity in future sessions.
 5. chronological_history: A polished, verbose, readable narrative timeline of what occurred during the session as chronological bullet points.
 
