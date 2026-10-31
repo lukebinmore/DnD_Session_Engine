@@ -1,14 +1,12 @@
+from DnDSessionEngine.core.theme import con
 from DnDSessionEngine.core.config import MODELS_DIR, LLM_REPO_ID, LLM_REPO_FOLDER, load_config
 from huggingface_hub import snapshot_download
 from huggingface_hub.utils import disable_progress_bars
 from pathlib import Path
 import onnxruntime_genai as og
 import logging
-from rich.console import Console
-from rich import print
 
 logger = logging.getLogger(__name__)
-console = Console()
 
 
 def run_prompt(model_ob, prompt: str):
@@ -30,12 +28,12 @@ def run_prompt(model_ob, prompt: str):
     generator = og.Generator(model, params)
     generator.append_tokens(input_tokens)
 
-    console.rule("[bold cyan]Model Generation[/]")
+    con.rule("Model Generation", style="rule.section")
     while not generator.is_done():
         generator.generate_next_token()
         token = generator.get_next_tokens()[0]
-        print(tokenizer_stream.decode(token), end="", highlight=False)
-    console.rule("[dim]End Response[/]")
+        con.print(tokenizer_stream.decode(token), end="", highlight=False)
+    con.rule("End Response", style="rule.sub")
 
 
 def load_model(engine_dir):

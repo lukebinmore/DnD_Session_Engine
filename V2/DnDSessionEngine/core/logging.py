@@ -1,17 +1,15 @@
+from DnDSessionEngine.core.theme import con
 from DnDSessionEngine.core.config import LOGS_DIR
 from datetime import datetime
-from rich.console import Console
 from rich.logging import RichHandler
 import logging
-import sys
 
 logger = logging.getLogger(__name__)
-console = Console()
 
 
 def initialise_logging():
     console_handler = RichHandler(
-        console=console,
+        console=con,
         show_time=False,
         show_path=False,
         rich_tracebacks=True,
@@ -27,16 +25,10 @@ def initialise_logging():
     file_formatter = logging.Formatter(fmt="[%(asctime)s] - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
     file_handler.setFormatter(file_formatter)
 
-    stream_handler = logging.StreamHandler(sys.stdout)
-    stream_handler.setLevel(getattr(logging, "INFO"))
-    stream_format = logging.Formatter(fmt="%(message)s")
-    stream_handler.setFormatter(stream_format)
-
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG)
 
     root_logger.handlers.clear()
-    # root_logger.addHandler(stream_handler)
     root_logger.addHandler(console_handler)
     root_logger.addHandler(file_handler)
 

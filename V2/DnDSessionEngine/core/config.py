@@ -1,6 +1,5 @@
-from rich.console import Console
+from DnDSessionEngine.core.theme import con
 from rich.table import Table
-from rich import print
 from prompt_toolkit import prompt
 from pathlib import Path
 import sys
@@ -8,7 +7,6 @@ import json
 import logging
 
 logger = logging.getLogger(__name__)
-console = Console()
 
 
 def get_app_root() -> Path:
@@ -43,6 +41,7 @@ LLM_REPO_NAME = LLM_REPO_ID.split("/")[-1]
 DEFAULT_CONFIG = {
     "Gemini API Key": "",
     "Gemini Models": "gemini-3.8-flash, gemini-3.7-flash, gemini-3.6-flash, gemini-3.5-flash",
+    "Kanka Campaign ID": "",
     "Kanka Token": "",
     "LLM Processor ID": "0",
 }
@@ -56,19 +55,19 @@ def initialise_directories():
 def build_config_table(config):
     table = Table(
         title="Current Configuration",
-        title_style="bold cyan",
-        border_style="dim",
+        title_style="table.title",
+        border_style="table.border",
         show_header=True,
-        header_style="bold magenta",
+        header_style="table.header",
         show_lines=True,
     )
-    table.add_column("Setting", style="yellow", no_wrap=True)
-    table.add_column("Value", style="green", overflow="fold")
+    table.add_column("Setting", style="table.column1", no_wrap=True)
+    table.add_column("Value", style="table.column2", overflow="fold")
 
     for key, value in config.items():
-        table.add_row(key, value if value.strip() else "[bold red]<EMPTY>[/]")
+        table.add_row(key, value if value.strip() else "[empty]<EMPTY>[/]")
 
-    print(table)
+    con.print(table)
 
 
 def initialise_config():
@@ -97,13 +96,14 @@ def initialise_config():
             any(v.strip() == "" for v in curr_config.values())
             or input("Would you like to edit the config?: (Blank for no) ").strip()
         ):
-            console.rule("[bold cyan]Editing Configuration[/]")
+            con.rule("Editing Configuration", style="rule.sub")
             for key, value in curr_config.items():
-                curr_config[key] = prompt(f" - {key}: ", default=value)
+                con.print(f" - [menu.key]{key}[/]:", end="")
+                curr_config[key] = prompt(f" ", default=value)
                 changed = True
-            console.rule("[dim]Updated Values[/]")
+            con.rule("Updated Values", style="rule.sub")
         else:
-            print("[bold green]Configuration accepted.[/]\n")
+            con.print("Configuration accepted.", style="success")
             break
 
     if changed:

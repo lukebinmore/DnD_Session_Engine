@@ -1,3 +1,4 @@
+from DnDSessionEngine.core.theme import con
 from DnDSessionEngine.core.config import initialise_directories, initialise_config
 from DnDSessionEngine.core.logging import initialise_logging
 from DnDSessionEngine.core.local_llm import initialise_llm
@@ -9,34 +10,37 @@ logger = logging.getLogger(__name__)
 
 
 def startup():
-    print("Starting Application...\n")
-
     try:
         initialise_logging()
-        logger.info("Initialising Logging, Done!\n")
+        logger.info("Initialising Logging, Done!")
 
+        con.rule("Directories", style="rule.section")
         logger.info("Initialising Directories...")
         initialise_directories()
-        logger.info("Initialising Directories, Done!\n")
+        logger.info("Initialising Directories, Done!")
 
+        con.rule("Config", style="rule.section")
         logger.info("Initialising Config...")
         initialise_config()
-        logger.info("Initialising Config, Done!\n")
+        logger.info("Initialising Config, Done!")
 
+        con.rule("Local Model", style="rule.section")
         logger.info("Initialising Local Model...")
         llm_model = initialise_llm()
-        logger.info("Initialising Local Model, Done!\n")
+        logger.info("Initialising Local Model, Done!")
 
+        con.rule("Gemini", style="rule.section")
         logger.info("Initialising Gemini...")
         gemini_client = initialise_gemini()
-        logger.info("Initialising Gemini, Done!\n")
+        logger.info("Initialising Gemini, Done!")
 
+        con.rule("Kanka", style="rule.section")
         logger.info("Initialising Kanka...")
-        initialise_kanka()
-        logger.info("Initialising Kanka, Done!\n")
+        campaign_data = initialise_kanka()
+        logger.info("Initialising Kanka, Done!")
 
-        startup_data = {"llm_model": llm_model, "gemini_client": gemini_client}
-        logger.info("Setup Complete\n")
+        startup_data = {"llm_model": llm_model, "gemini_client": gemini_client, "campaign_data": campaign_data}
+        logger.info("Setup Complete")
         return startup_data
 
     except Exception:
