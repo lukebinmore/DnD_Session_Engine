@@ -4,36 +4,60 @@ from huggingface_hub import snapshot_download
 from huggingface_hub.utils import disable_progress_bars
 from pathlib import Path
 import onnxruntime_genai as og
+import time
+import json
 import logging
 
 logger = logging.getLogger(__name__)
 
+MAX_NEW_TOKENS = 2048
 
-def run_prompt(model_ob, prompt: str):
+
+def run_local_generation(model_ob, prompt, temperature=0.0, system_prompt=None, output=False):
     model = model_ob["model"]
     tokenizer = model_ob["tokenizer"]
     tokenizer_stream = tokenizer.create_stream()
 
-    formatted_prompt = f"<|user|>\n{prompt}<|end|>\n<|assistant|>\n"
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
+
+    messages_json = json.dumps(messages)
+    formatted_prompt = tokenizer.apply_chat_template(messages_json, add_generation_prompt=True)
     input_tokens = tokenizer.encode(formatted_prompt)
 
     params = og.GeneratorParams(model)
     params.set_search_options(
-        max_length=512,
-        temperature=0.7,
-        top_p=0.9,
-        do_sample=True,
+        max_length=len(input_tokens) + MAX_NEW_TOKENS, temperature=temperature, top_p=0.9, do_sample=(temperature > 0.0)
     )
 
     generator = og.Generator(model, params)
     generator.append_tokens(input_tokens)
 
-    con.rule("Model Generation", style="rule.section")
-    while not generator.is_done():
-        generator.generate_next_token()
-        token = generator.get_next_tokens()[0]
-        con.print(tokenizer_stream.decode(token), end="", highlight=False)
-    con.rule("End Response", style="rule.sub")
+    collected_chunks = []
+    start_time = time.perf_counter()
+
+    try:
+        if not output:
+            status = con.status("[highlight]Thinking...[/]", spinner="point")
+            status.start()
+        while not generator.is_done():
+            generator.generate_next_token()
+            token = generator.get_next_tokens()[0]
+            chunk = tokenizer_stream.decode(token)
+            if chunk:
+                collected_chunks.append(chunk)
+                if output:
+                    con.print(chunk, end="", style="success")
+        elapsed = time.perf_counter() - start_time
+        if not output:
+            status.stop()
+            con.print(f"[highlight]Thought for {elapsed:.1f}s[/]")
+    finally:
+        del generator
+
+    return "".join(collected_chunks).strip()
 
 
 def load_model(engine_dir):
@@ -105,6 +129,7 @@ def download_model(repo_id, repo_subfolder=None, local_model_path=None):
 
 
 def initialise_llm():
+    logger.info("Initialising Local Model...")
     repo_id = LLM_REPO_ID
     repo_folder = LLM_REPO_FOLDER
     model_name = repo_id.split("/")[-1]
@@ -113,5 +138,7 @@ def initialise_llm():
     download_model(repo_id, repo_folder, local_model_path)
     engine_dir = resolve_model_path(local_model_path)
     model = load_model(engine_dir)
+
+    logger.info("Initialising Local Model, Done!")
 
     return model

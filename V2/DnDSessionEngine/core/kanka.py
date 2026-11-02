@@ -1,8 +1,9 @@
-from DnDSessionEngine.core.config import load_config
+from DnDSessionEngine.core.config import load_config, MANIFEST_PATH, ENTITIES_DIR
+from DnDSessionEngine.core.file_manager import dump_to_file
+import html
+import re
 import requests
 import logging
-
-import json
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +188,83 @@ KANKA_ENTITY_SCHEMA = {
 }
 
 
+def build_campaign_data(campaign_data):
+    logger.info("Building campaign data json files...")
+    for module, records in campaign_data.items():
+        for record in records:
+            record_id = record.get("entity_id")
+            name = record.get("name")
+
+            if not record_id or not name:
+                continue
+
+            file_name = f"{record_id}.json"
+            entity_file_path = ENTITIES_DIR / file_name
+            dump_to_file(record, entity_file_path, f"{module} {name} ({record_id})")
+    logger.info("Campaign json data files build successfully!")
+
+
+def create_summary(entity):
+    title = entity.get("title")
+    entity_type = entity.get("type")
+
+    descriptor_parts = []
+    if title:
+        descriptor_parts.append(str(title).strip())
+    if entity_type:
+        descriptor_parts.append(f"({str(entity_type).strip()})")
+
+    descriptor = " ".join(descriptor_parts).strip()
+
+    raw_entry = entity.get("entry", "")
+    first_sentence = ""
+    if raw_entry:
+        clean_text = re.sub(r"<[^>]+>", "", raw_entry)
+        clean_text = html.unescape(clean_text).strip()
+        match = re.search(r"^,*?[.!?](?:\s|$)", clean_text)
+        if match:
+            first_sentence = match.group(0).strip()
+        else:
+            first_sentence = clean_text[:120].strip()
+
+    if descriptor and first_sentence:
+        return f"{descriptor} - {first_sentence}"
+    if descriptor:
+        return descriptor
+    if first_sentence:
+        return first_sentence
+
+    return "No description provided."
+
+
+def build_manifest(campaign_data):
+    logger.info("Building campaign data manifest...")
+    manifest = {"entities": []}
+
+    for module, records in campaign_data.items():
+        for record in records:
+            record_id = record.get("id")
+            name = record.get("name")
+
+            if not record_id or not name:
+                continue
+
+            manifest["entities"].append(
+                {
+                    "id": record_id,
+                    "entity_id": record.get("entity_id"),
+                    "module": module,
+                    "name": name,
+                    "type": record.get("type"),
+                    "summary": create_summary(record),
+                }
+            )
+
+    dump_to_file(manifest, MANIFEST_PATH, "manifest")
+    logger.info("Built campaign data manifest successfully!")
+    return manifest
+
+
 def filter_entity(raw):
     clean = {}
     for key, value in raw.items():
@@ -209,9 +287,9 @@ def filter_entity(raw):
     return clean
 
 
-def pull_all_data():
+def get_kanka_data():
     campaign_data = {}
-
+    logger.info("Pulling entities from campaign...")
     for module in KANKA_MODULES:
         try:
             records = kanka_get(f"{module}?related=1")
@@ -219,8 +297,11 @@ def pull_all_data():
         except Exception as e:
             logger.error(f"Could not load module '{module}'")
             raise e
+    logger.info("Entities pulled successfully!")
 
-    return campaign_data
+    manifest = build_manifest(campaign_data)
+    build_campaign_data(campaign_data)
+    return manifest
 
 
 def kanka_get(url="", timeout=10.0, *args, **kwargs):
@@ -232,20 +313,15 @@ def kanka_get(url="", timeout=10.0, *args, **kwargs):
 
 
 def initialise_kanka():
+    logger.info("Initialising Kanka...")
     KANKA_HEADERS["Authorization"] += load_config("Kanka Token")
     global kanka_url
     kanka_url += f"{load_config("Kanka Campaign ID")}/"
 
     try:
-        logger.info("Verifying Kanka API token...")
         response = kanka_get()
         logger.info(f"Kanka API token verified successfully! Campaign: {response['name']}")
-
-        logger.info("Pulling entities from campaign...")
-        campaign_data = pull_all_data()
-        logger.info("Entities pulled successfully!")
-
-        return campaign_data
+        logger.info("Initialising Kanka, Done!")
 
     except Exception as e:
         logger.error("Failed to initialise Kanka!")

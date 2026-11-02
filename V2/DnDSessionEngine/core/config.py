@@ -1,5 +1,5 @@
 from DnDSessionEngine.core.theme import con
-from rich.table import Table
+from DnDSessionEngine.core.helpers import build_table
 from prompt_toolkit import prompt
 from pathlib import Path
 import sys
@@ -28,10 +28,15 @@ APP_DATA = APP_ROOT / "AppData"
 CONFIG_DIR = APP_DATA / "config"
 LOGS_DIR = APP_DATA / "logs"
 MODELS_DIR = APP_DATA / "models"
+CAMPAIGN_DIR = APP_DATA / "campaign"
+TRUTH_LOG_DIR = CAMPAIGN_DIR / "truth_logs"
+ENTITIES_DIR = CAMPAIGN_DIR / "entities"
 
-DIRECTORIES = [CONFIG_DIR, LOGS_DIR, MODELS_DIR]
+
+DIRECTORIES = [CONFIG_DIR, LOGS_DIR, MODELS_DIR, CAMPAIGN_DIR, TRUTH_LOG_DIR, ENTITIES_DIR]
 
 CONFIG_PATH = CONFIG_DIR / "config.json"
+MANIFEST_PATH = CAMPAIGN_DIR / "manifest.json"
 
 GEMINI_RETRIES = 3
 LLM_REPO_ID = "microsoft/Phi-4-mini-instruct-onnx"
@@ -48,29 +53,14 @@ DEFAULT_CONFIG = {
 
 
 def initialise_directories():
+    logger.info("Initialising Directories...")
     for directory in DIRECTORIES:
         directory.mkdir(parents=True, exist_ok=True)
-
-
-def build_config_table(config):
-    table = Table(
-        title="Current Configuration",
-        title_style="table.title",
-        border_style="table.border",
-        show_header=True,
-        header_style="table.header",
-        show_lines=True,
-    )
-    table.add_column("Setting", style="table.column1", no_wrap=True)
-    table.add_column("Value", style="table.column2", overflow="fold")
-
-    for key, value in config.items():
-        table.add_row(key, value if value.strip() else "[empty]<EMPTY>[/]")
-
-    con.print(table)
+    logger.info("Initialising Directories, Done!")
 
 
 def initialise_config():
+    logger.info("Initialising Config...")
     if not CONFIG_PATH.exists():
         with CONFIG_PATH.open("w", encoding="utf-8") as file:
             json.dump(DEFAULT_CONFIG, file, indent=4)
@@ -91,7 +81,7 @@ def initialise_config():
             changed = True
 
     while True:
-        build_config_table(curr_config)
+        build_table(curr_config, ["Setting", "Value"], "Current Configuration")
         if (
             any(v.strip() == "" for v in curr_config.values())
             or input("Would you like to edit the config?: (Blank for no) ").strip()
@@ -110,6 +100,7 @@ def initialise_config():
         with CONFIG_PATH.open("w", encoding="utf-8") as file:
             json.dump(curr_config, file, indent=4)
         logger.info("Configuration saved to disk.")
+    logger.info("Initialising Config, Done!")
 
 
 def load_config(key=None):
