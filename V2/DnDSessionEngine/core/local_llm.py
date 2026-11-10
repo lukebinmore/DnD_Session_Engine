@@ -1,16 +1,17 @@
 from DnDSessionEngine.core.theme import con
 from DnDSessionEngine.core.config import MODELS_DIR, LLM_REPO_ID, LLM_REPO_FOLDER, load_config
+from DnDSessionEngine.core.file_manager import dump_to_file, read_json_file
 from huggingface_hub import snapshot_download
 from huggingface_hub.utils import disable_progress_bars
 from pathlib import Path
 import onnxruntime_genai as og
-import time
 import json
 import logging
 
 logger = logging.getLogger(__name__)
 
 MAX_NEW_TOKENS = 2048
+MAX_TARGET_LEGNTH = 16384
 
 
 def run_local_generation(model_ob, prompt, temperature=0.0, system_prompt=None, output=False):
@@ -36,12 +37,7 @@ def run_local_generation(model_ob, prompt, temperature=0.0, system_prompt=None, 
     generator.append_tokens(input_tokens)
 
     collected_chunks = []
-    start_time = time.perf_counter()
-
     try:
-        if not output:
-            status = con.status("[highlight]Thinking...[/]", spinner="point")
-            status.start()
         while not generator.is_done():
             generator.generate_next_token()
             token = generator.get_next_tokens()[0]
@@ -50,10 +46,6 @@ def run_local_generation(model_ob, prompt, temperature=0.0, system_prompt=None, 
                 collected_chunks.append(chunk)
                 if output:
                     con.print(chunk, end="", style="success")
-        elapsed = time.perf_counter() - start_time
-        if not output:
-            status.stop()
-            con.print(f"[highlight]Thought for {elapsed:.1f}s[/]")
     finally:
         del generator
 
@@ -62,13 +54,10 @@ def run_local_generation(model_ob, prompt, temperature=0.0, system_prompt=None, 
 
 def load_model(engine_dir):
     logger.info(f"Loading ONNX GenAI model into runtime from: {engine_dir}")
-    processor_id = load_config("LLM Processor ID")
+    device_type = patch_config(engine_dir)
     device_type = "CPU"
     try:
         config = og.Config(str(engine_dir))
-        if processor_id != "-1":
-            config.set_provider_option("dml", "device_id", processor_id)
-            device_type = "GPU"
         model = og.Model(config)
         tokenizer = og.Tokenizer(model)
 
@@ -78,6 +67,27 @@ def load_model(engine_dir):
     except Exception as e:
         logger.error(f"Failed to load ONNX model into runtime!")
         raise e
+
+
+def patch_config(engine_dir):
+    logger.info("Patching config with required changes...")
+    config_path = engine_dir / "genai_config.json"
+    processor_id = load_config("LLM Processor ID")
+    config = read_json_file(config_path, "genai_config.json")
+    device_type = "CPU"
+
+    try:
+        if processor_id != 1:
+            config["model"]["decoder"]["session_options"]["provider_options"] = [{"dml": {"device_id": processor_id}}]
+            device_type = "GPU"
+        config["search"]["max_length"] = MAX_TARGET_LEGNTH
+    except Exception as e:
+        logger.warning("Patching config failed!")
+        raise e
+
+    dump_to_file(config, config_path, "genai_config")
+    logger.info("Patched config with required changes successfully!")
+    return device_type
 
 
 def resolve_model_path(local_model_path):
@@ -137,8 +147,7 @@ def initialise_llm():
 
     download_model(repo_id, repo_folder, local_model_path)
     engine_dir = resolve_model_path(local_model_path)
-    model = load_model(engine_dir)
 
     logger.info("Initialising Local Model, Done!")
 
-    return model
+    return engine_dir

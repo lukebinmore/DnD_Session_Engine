@@ -82,19 +82,20 @@ def initialise_config():
 
     while True:
         build_table(curr_config, ["Setting", "Value"], "Current Configuration")
-        if (
-            any(v.strip() == "" for v in curr_config.values())
-            or input("Would you like to edit the config?: (Blank for no) ").strip()
-        ):
-            con.rule("Editing Configuration", style="rule.sub")
-            for key, value in curr_config.items():
-                con.print(f" - [menu.key]{key}[/]:", end="")
-                curr_config[key] = prompt(f" ", default=value)
-                changed = True
-            con.rule("Updated Values", style="rule.sub")
-        else:
-            con.print("Configuration accepted.", style="success")
-            break
+        missing = any(v.strip() == "" for v in curr_config.values())
+
+        if not missing:
+            con.print("Would you like to edit the config?: (Blank for no) ", end="", style="menu.key")
+            if not input().strip():
+                con.print("Configuration accepted.", style="success")
+                break
+
+        con.rule("Editing Configuration", style="rule.sub")
+        for key, value in curr_config.items():
+            con.print(f" - {key}:", end="", style="menu.key")
+            curr_config[key] = prompt(f" ", default=value)
+            changed = True
+        con.rule("Updated Values", style="rule.sub")
 
     if changed:
         with CONFIG_PATH.open("w", encoding="utf-8") as file:

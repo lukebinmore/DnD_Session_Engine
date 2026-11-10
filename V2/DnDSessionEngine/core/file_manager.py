@@ -38,7 +38,7 @@ def read_json_file(path, text=None):
         with open(path, "r") as file:
             file_content = json.load(file)
             if text:
-                logger.info(f"{text} retrieved successfully!")
+                logger.info(f"{text.title()} retrieved successfully!")
     except Exception:
         if text:
             logger.info(f"{text} not found!")

@@ -21,7 +21,7 @@ def startup():
         initialise_config()
 
         con.rule("Local Model", style="rule.section")
-        llm_model = initialise_llm()
+        llm_model_dir = initialise_llm()
 
         con.rule("Gemini", style="rule.section")
         gemini_client = initialise_gemini()
@@ -29,7 +29,7 @@ def startup():
         con.rule("Kanka", style="rule.section")
         initialise_kanka()
 
-        startup_data = {"llm_model": llm_model, "gemini_client": gemini_client}
+        startup_data = {"llm_model_dir": llm_model_dir, "gemini_client": gemini_client}
         logger.info("Setup Complete")
         return startup_data
 

@@ -1,191 +1,23 @@
+from DnDSessionEngine.core.theme import con
 from DnDSessionEngine.core.config import load_config, MANIFEST_PATH, ENTITIES_DIR
 from DnDSessionEngine.core.file_manager import dump_to_file
+from DnDSessionEngine.core.kanka_config import KANKA_MODULES, KANKA_DISREGARD_ENTRIES
+from rich.live import Live
+import time
 import html
+import os
 import re
 import requests
+import json
 import logging
 
 logger = logging.getLogger(__name__)
 
+KANKA_RATE_LIMIT_DELAY = 30
 KANKA_URL_BASE = "https://api.kanka.io/1.0/campaigns/"
 KANKA_HEADERS = {"Accept": "application/json", "Authorization": "Bearer ", "Content-Type": "application/json"}
 
 kanka_url = KANKA_URL_BASE
-
-KANKA_MODULES = [
-    "characters",
-    "locations",
-    "organisations",
-    "items",
-    "events",
-    "quests",
-    "journals",
-    "families",
-    "notes",
-]
-
-DISCARD_FIELDS = {
-    "is_private",
-    "created_at",
-    "updated_at",
-    "created_by",
-    "updated_by",
-    "urls",
-    "image",
-    "image_uuid",
-    "image_full",
-    "image_thumb",
-    "has_custom_image",
-    "focus_x",
-    "focus_y",
-    "header_full",
-    "header_uuid",
-    "has_custom_header",
-    "tooltip",
-    "is_template",
-    "is_personality_visible",
-    "is_personality_pinned",
-    "is_appearance_pinned",
-    "is_attributes_private",
-    "status_id",
-    "entry_parsed",
-    "private_races",
-    "private_families",
-    "visibility_id",
-    "layout_id",
-    "permissions",
-    "settings",
-    "sync",
-    "position",
-    "is_pinned",
-    "is_star",
-}
-
-KANKA_ENTITY_SCHEMA = {
-    "_meta": {
-        "rules": [
-            "All foreign keys ending in '_id' or named 'locations', 'races', 'families' require the target module's 'id'.",
-            "'tags' and nested 'posts' require the parent or target's global 'entity_id'.",
-            "Do not hallucinate IDs; only link to IDs present in campaign context.",
-            "Dates should be formatted as freeform strings or in-universe calendar strings.",
-            "Fields marked 'optional' can be omitted or set to null if unknown.",
-        ]
-    },
-    "characters": {
-        "required": ["name"],
-        "fields": {
-            "name": {"type": "string", "desc": "Character's full name"},
-            "entry": {"type": "string", "desc": "Main biography and narrative summary"},
-            "title": {"type": "string", "desc": "Honorific, military rank, or social title"},
-            "type": {"type": "string", "desc": "Role classification (e.g., NPC, PC, Merchant, Villain)"},
-            "age": {"type": "string", "desc": "Age descriptor (e.g., '35', 'Unknown', 'Ancient')"},
-            "sex": {"type": "string", "desc": "Gender/sex identity"},
-            "pronouns": {"type": "string", "desc": "e.g., 'they/them', 'he/him', 'she/her'"},
-            "status": {
-                "type": "string",
-                "desc": "Operational state (e.g., 'Alive', 'Deceased', 'Missing', 'Imprisoned')",
-            },
-            "is_dead": {"type": "boolean", "desc": "True if deceased, False otherwise"},
-            "locations": {"type": "list[int]", "desc": "List of Location module IDs"},
-            "races": {"type": "list[int]", "desc": "List of Race module IDs"},
-            "families": {"type": "list[int]", "desc": "List of Family module IDs"},
-            "tags": {"type": "list[int]", "desc": "List of Tag global entity_ids"},
-            "traits": {
-                "type": "list[object]",
-                "schema": {
-                    "name": "string (trait label)",
-                    "entry": "string (description)",
-                    "section": "'appearance' | 'personality'",
-                },
-            },
-            "posts": {
-                "type": "list[object]",
-                "schema": {
-                    "name": "string (article title, e.g., 'Backstory', 'Session 14 Encounter')",
-                    "entry": "string (article content)",
-                },
-            },
-        },
-    },
-    "locations": {
-        "required": ["name"],
-        "fields": {
-            "name": {"type": "string", "desc": "Location name"},
-            "type": {"type": "string", "desc": "Settlement type (e.g., City, Dungeon, Tavern, Kingdom, District)"},
-            "entry": {"type": "string", "desc": "Geographical/lore description"},
-            "parent_location_id": {"type": "int", "desc": "Location module ID of enclosing parent location"},
-            "is_underwater": {"type": "boolean", "desc": "True if aquatic"},
-            "tags": {"type": "list[int]", "desc": "List of Tag global entity_ids"},
-            "posts": {"type": "list[object]", "schema": {"name": "string", "entry": "string"}},
-        },
-    },
-    "organisations": {
-        "required": ["name"],
-        "fields": {
-            "name": {"type": "string", "desc": "Faction, guild, military, or religious order name"},
-            "type": {"type": "string", "desc": "e.g., 'Thieves Guild', 'Holy Order', 'Mercenary Band'"},
-            "entry": {"type": "string", "desc": "History, goals, and structure"},
-            "organisation_id": {"type": "int", "desc": "Organisation module ID of parent organisation"},
-            "location_id": {"type": "int", "desc": "Location module ID of headquarters/seat"},
-            "tags": {"type": "list[int]", "desc": "List of Tag global entity_ids"},
-            "posts": {"type": "list[object]", "schema": {"name": "string", "entry": "string"}},
-        },
-    },
-    "items": {
-        "required": ["name"],
-        "fields": {
-            "name": {"type": "string", "desc": "Item or artifact name"},
-            "type": {"type": "string", "desc": "e.g., 'Weapon', 'Relic', 'Potion', 'Document'"},
-            "entry": {"type": "string", "desc": "Appearance, magical properties, or history"},
-            "price": {"type": "string", "desc": "Monetary value (e.g., '250 gp', 'Priceless')"},
-            "size": {"type": "string", "desc": "Size classification (e.g., 'Tiny', 'Medium')"},
-            "weight": {"type": "string", "desc": "Weight measurement (e.g., '3 lbs', '15 kg')"},
-            "character_id": {"type": "int", "desc": "Character module ID currently holding the item"},
-            "location_id": {"type": "int", "desc": "Location module ID where item resides (if unheld)"},
-            "tags": {"type": "list[int]", "desc": "List of Tag global entity_ids"},
-            "posts": {"type": "list[object]", "schema": {"name": "string", "entry": "string"}},
-        },
-    },
-    "quests": {
-        "required": ["name"],
-        "fields": {
-            "name": {"type": "string", "desc": "Quest or objective title"},
-            "type": {"type": "string", "desc": "e.g., 'Main Quest', 'Bounty', 'Side Quest'"},
-            "entry": {"type": "string", "desc": "Objectives, steps, and reward details"},
-            "quest_id": {"type": "int", "desc": "Quest module ID of parent quest"},
-            "character_id": {"type": "int", "desc": "Character module ID of quest giver"},
-            "is_completed": {"type": "boolean", "desc": "True if resolved/completed"},
-            "tags": {"type": "list[int]", "desc": "List of Tag global entity_ids"},
-            "posts": {"type": "list[object]", "schema": {"name": "string", "entry": "string"}},
-        },
-    },
-    "events": {
-        "required": ["name"],
-        "fields": {
-            "name": {"type": "string", "desc": "Event or battle name"},
-            "type": {"type": "string", "desc": "e.g., 'Battle', 'Festival', 'Assassination', 'Treaty'"},
-            "date": {"type": "string", "desc": "In-universe or session timeline date"},
-            "entry": {"type": "string", "desc": "What occurred during the event"},
-            "location_id": {"type": "int", "desc": "Location module ID where event took place"},
-            "event_id": {"type": "int", "desc": "Event module ID of parent event series"},
-            "tags": {"type": "list[int]", "desc": "List of Tag global entity_ids"},
-            "posts": {"type": "list[object]", "schema": {"name": "string", "entry": "string"}},
-        },
-    },
-    "journals": {
-        "required": ["name"],
-        "fields": {
-            "name": {"type": "string", "desc": "Session or log title"},
-            "type": {"type": "string", "desc": "e.g., 'Session Log', 'Letter', 'Diary'"},
-            "date": {"type": "string", "desc": "Session date or in-game date"},
-            "entry": {"type": "string", "desc": "Log contents or narrative recount"},
-            "character_id": {"type": "int", "desc": "Character module ID of author/perspective"},
-            "location_id": {"type": "int", "desc": "Location module ID where written/occurred"},
-            "tags": {"type": "list[int]", "desc": "List of Tag global entity_ids"},
-            "posts": {"type": "list[object]", "schema": {"name": "string", "entry": "string"}},
-        },
-    },
-}
 
 
 def build_campaign_data(campaign_data):
@@ -237,79 +69,210 @@ def create_summary(entity):
     return "No description provided."
 
 
+def build_manifest_index(manifest):
+    index_lines = []
+
+    for eid, value in manifest.items():
+        id = value.get("id")
+        module = value.get("module")
+        name = value.get("name", "").strip()
+        aliases = value.get("aliases")
+        summary = value.get("summary") or ""
+
+        if not name:
+            continue
+
+        clean_summary = summary.replace("\n", " ").strip()
+        index_lines.append(
+            f"- ID: {id} | Entity ID: {eid} | Module: {module} | Name: {name} | Aliases: {aliases} | Summary: {clean_summary}"
+        )
+
+    manifest_index = "\n".join(index_lines)
+    return manifest_index
+
+
 def build_manifest(campaign_data):
     logger.info("Building campaign data manifest...")
-    manifest = {"entities": []}
+    manifest = {}
 
     for module, records in campaign_data.items():
         for record in records:
             record_id = record.get("id")
+            eid = record.get("entity_id")
             name = record.get("name")
+            aliases = record.get("aliases", [])
 
             if not record_id or not name:
                 continue
 
-            manifest["entities"].append(
-                {
-                    "id": record_id,
-                    "entity_id": record.get("entity_id"),
-                    "module": module,
-                    "name": name,
-                    "type": record.get("type"),
-                    "summary": create_summary(record),
-                }
-            )
+            manifest[eid] = {
+                "name": name,
+                "aliases": aliases,
+                "id": record_id,
+                "entity_id": record.get("entity_id"),
+                "module": module,
+                "type": record.get("type"),
+                "summary": create_summary(record),
+            }
 
     dump_to_file(manifest, MANIFEST_PATH, "manifest")
     logger.info("Built campaign data manifest successfully!")
     return manifest
 
 
-def filter_entity(raw):
+def filter_entity(raw, module=None):
     clean = {}
+    if module:
+        clean["module"] = module
     for key, value in raw.items():
-        if key in DISCARD_FIELDS:
+        if key in KANKA_DISREGARD_ENTRIES:
             continue
 
-        if not isinstance(value, list):
-            clean[key] = value
+        if value in [None, "", [], {}]:
             continue
 
-        if value and not isinstance(value[0], dict):
-            clean[key] = value
+        if key == "entity_assets":
+            clean["aliases"] = [a["name"] for a in value if a.get("type_id") == 3]
             continue
 
-        clean_value = [
-            {k: v for k, v in item.items() if k not in DISCARD_FIELDS} for item in value if isinstance(item, dict)
-        ]
-        if clean_value:
-            clean[key] = clean_value
+        if key == "traits":
+            appearance = [[t.get("name"), t.get("entry")] for t in value if t.get("section") == "appearance"]
+            personality = [[t.get("name"), t.get("entry")] for t in value if t.get("section") == "personality"]
+            if appearance:
+                clean["appearance"] = appearance
+            if personality:
+                clean["personality"] = personality
+            if not appearance and not personality:
+                clean[key] = value
+            continue
+
+        if key == "posts":
+            clean["posts"] = [{"name": e.get("name"), "entry": e.get("entry")} for e in value]
+
+        if isinstance(value, str):
+            clean[key] = value.replace("<p>", "").replace("</p>", "").strip("\"'“”‘’")
+            continue
+
+        if isinstance(value, list):
+            cleaned_list = []
+            for item in value:
+                if isinstance(item, dict):
+                    cleaned_list.append(filter_entity(item))
+                else:
+                    cleaned_list.append(item)
+            if cleaned_list:
+                clean[key] = cleaned_list
+            continue
+
+        if isinstance(value, dict):
+            cleaned_dict = filter_entity(value)
+            if cleaned_dict:
+                clean[key] = cleaned_dict
+            continue
+
+        clean[key] = value
     return clean
 
 
 def get_kanka_data():
     campaign_data = {}
+    campaign_data_orig = {}
     logger.info("Pulling entities from campaign...")
     for module in KANKA_MODULES:
         try:
             records = kanka_get(f"{module}?related=1")
-            campaign_data[module] = [filter_entity(record) for record in records]
+            campaign_data_orig[module] = [record for record in records]
+            campaign_data[module] = [filter_entity(record, module) for record in records]
         except Exception as e:
             logger.error(f"Could not load module '{module}'")
             raise e
     logger.info("Entities pulled successfully!")
 
-    manifest = build_manifest(campaign_data)
+    manifest = build_manifest(campaign_data_orig)
     build_campaign_data(campaign_data)
     return manifest
 
 
-def kanka_get(url="", timeout=10.0, *args, **kwargs):
+def kanka_post(url="", data=None, timeout=10.0, mode="POST", *args, **kwargs):
     url = kanka_url + url
-    response = requests.get(url=url, headers=KANKA_HEADERS, timeout=timeout, *args, **kwargs)
-    response.raise_for_status()
-    body = response.json()["data"]
-    return body
+    data = json.dumps(data, default=str)
+
+    upload = requests.post if mode == "POST" else requests.patch if mode == "PATCH" else requests.put
+    while True:
+        try:
+            response = upload(url=url, headers=KANKA_HEADERS, data=data, timeout=timeout, *args, **kwargs)
+            response.raise_for_status()
+
+            if response.ok:
+                break
+        except requests.exceptions.HTTPError as e:
+            processed = process_http_error(0, data)
+            if not isinstance(processed, bool):
+                data = processed
+            if not processed:
+                raise e
+
+    return response.json().get("data", {})
+
+
+def kanka_get(url="", timeout=10.0, *args, **kwargs):
+    next_url = kanka_url + url
+    all_data = []
+    while next_url:
+        try:
+            response = requests.get(url=next_url, headers=KANKA_HEADERS, timeout=timeout, *args, **kwargs)
+            response.raise_for_status()
+            payload = response.json()
+            data = payload.get("data")
+
+            if not isinstance(data, list):
+                return data
+
+            all_data.extend(data)
+            next_url = payload.get("link", {}).get("next")
+        except requests.exceptions.HTTPError as e:
+            if not process_http_error(e):
+                raise e
+
+    return all_data
+
+
+def process_http_error(error, obj=None):
+    if not error.get("response", {}).get("status_code"):
+        print(error)
+        return False
+
+    status_code = error.response.status_code
+    if status_code == 429:
+        delay = KANKA_RATE_LIMIT_DELAY
+        live = Live(console=con, transient=True)
+        live.start()
+        for _ in range(1, delay + 1):
+            live.update(f"[warning]Kanka rate limit exceeded! Waiting for {delay} seconds before retry...[/]")
+            time.sleep(1)
+            delay += -1
+        live.stop()
+        return True
+    if status_code == 422:
+        logger.error("Upload Failed, incorrect payload format!")
+        if obj:
+            with open("PAYLOAD.json", "w") as file:
+                json.dumps(obj, file)
+            con.print("Payload saved to 'PAYLOAD.json'.", type="highlight")
+            con.print(
+                "Please update and safe the file and press enter. if the payload is not fixable, enter any value: ",
+                style="menu.key",
+            )
+            response = input()
+            if not response:
+                with open("PAYLOAD.json", "r") as file:
+                    obj = json.loads(file)
+                    os.remove("PAYLOAD.json")
+                    return obj
+            return False
+    else:
+        print(error)
+    return False
 
 
 def initialise_kanka():
