@@ -1,16 +1,16 @@
 from DnDSessionEngine.core.theme import con
 from DnDSessionEngine.core.kanka import get_kanka_data, kanka_post, build_manifest_index
-from DnDSessionEngine.core.kanka_config import KANKA_TEMPLATES
+from DnDSessionEngine.core.kanka_config import KANKA_TEMPLATES, KANKA_LINKS_FIELDS, KANKA_LINKS_TEMPLATES
 from DnDSessionEngine.core.file_manager import prompt_for_file, read_json_file, dump_to_file
 from DnDSessionEngine.core.config import TRUTH_LOG_DIR, ENTITIES_DIR
 from DnDSessionEngine.core.helpers import build_table
 from DnDSessionEngine.core.gemini import upload_file_to_gemini, run_gemini_generation
-from pathlib import Path
 from datetime import datetime
+from rich.prompt import Confirm, IntPrompt, Prompt
 import json
 import logging
-
 import traceback
+
 from rich.pretty import pprint
 
 logger = logging.getLogger(__name__)
@@ -102,6 +102,7 @@ Your task is to analyze a chronological session Truth Log against an existing Ca
    - Names must be concise proper nouns without parenthetical notes or narrative fluff (e.g., write "Enchanted Bone Dagger", NEVER "The bone dagger found under the floorboards").
    - Deduplicate locations: do not create sub-entries for generic streets, alleyways, or doorways if the overarching settlement or establishment is present. Only include these if a location or entity seems notable.
    - Ignore mundane background props, common coins, and nameless background mobs.
+   - Ignore membership entities if required id or entity_id does not yet exist.
 
 3. "updates" ENTITIES (PROGRESSION & RENAMES):
    - Must be an existing entity from the manifest that experienced significant plot development, combat, dialogue, movement, injury, or discovery or general information updates.
@@ -152,24 +153,92 @@ Only apply changes to fields explicitly defined in the corresponding module temp
 1. Whenever mentioning any known entity in any text/entry field, you must link it using the exact syntax `[entity:entity_id]` (e.g., `[entity:12345]'s` or `[entity:12345]`), resolving `entity_id` against the Manifest. Do not include a custom display name in the tag.
 
 ### OUTPUT FORMAT:
-Return ONLY a valid JSON object of sparse delta objects using the entity_id as the top-level string key. Do not wrap in markdown code fences (no ```json), and include no conversational text or preamble.
+Return ONLY a valid JSON array of sparse delta objects. Do not wrap in markdown code fences (no ```json), and include no conversational text or preamble.
 
-{
-  "10108758": {
+[
+  {
     "entity_id": 10108758,
     "id": 2626920,
     "module": "characters",
     "status_id": 3
   },
-  "10108739": {
+  {
     "entity_id": 10108739,
     "id": 1845102,
     "module": "characters",
     "location_id": 54102,
     "title": "Former Guard Captain"
   }
-}
+]
 """
+
+ENTITY_LINKS_SYSTEM_PROMPT = """You are an expert tabletop RPG campaign archivist and entity relationship manager.
+Your task is to analyse a session Truth Log and identify relationships between campaign entities. You must create new relationships or update existing ones using the supplied relationship templates.
+
+### INPUT DATA
+1. Existing Links: All relationships currently recorded between campaign entities.
+2. Templates: Definitions of supported relationship types, including their fields and API endpoints.
+   - new_url: Endpoint used to create a relationship.
+   - update_url: Endpoint used to update an existing relationship.
+3. Manifest: A lookup directory containing entity_id, id, name and type. Use this to resolve entities and their integer IDs.
+4. Truth Log: A chronological record of events and discoveries from the current session.
+
+### RELATIONSHIP IDENTIFICATION
+1. Identify relationships established or changed during the session, using only the relationship types defined in the templates.
+2. Consider all supported entity types, including Player Characters, NPCs, organisations and locations.
+3. Only create relationships supported by evidence in the Truth Log.
+4. Resolve all entities using the Manifest. Never invent or guess entity IDs.
+5. Check Existing Links before creating a relationship to avoid duplicates.
+
+### CREATING NEW RELATIONSHIPS
+- Use the appropriate relationship template.
+- Populate the template with the required information.
+- Preserve the template's field names, data types and structure.
+- Populate new_url with the exact endpoint provided by the template.
+- Return the completed object in the "new" list.
+
+### UPDATING EXISTING RELATIONSHIPS
+- Only update relationships when the Truth Log provides new or changed information.
+- Preserve existing information unless the Truth Log provides evidence that it has changed.
+- Populate update_url with the exact endpoint provided by the template.
+- Include ONLY the fields that need changing and the id and update_url fields.
+- Return the completed object in the "updates" list.
+- Do not return relationships that require no changes.
+
+### IMPORTANT RULES
+1. Only use relationship types and fields defined in the supplied templates.
+2. Never invent information, entity IDs or API endpoints.
+3. Do not create duplicate relationships.
+4. Do not return entity updates. This prompt only handles relationships.
+5. Do not return the same relationship in both lists.
+6. Only process relationship removals if the templates explicitly support them.
+
+### OUTPUT FORMAT
+Return ONLY a valid JSON object containing exactly two lists:
+
+- "new": A list of new relationship objects based on their respective templates, with new_url populated.
+- "updates": A list of existing relationship objects containing the updated fields and required identifiers, with update_url populated.
+
+If no relationships need creating or updating, return empty lists.
+Do not include explanations, reasoning, markdown code fences or conversational text.
+
+Example structure:
+{
+  "new": [
+    {
+      "new_url": "EXACT_TEMPLATE_ENDPOINT",
+      "entity_a_id": 12345,
+      "entity_b_id": 67890
+    }
+  ],
+  "updates": [
+    {
+      "update_url": "EXACT_TEMPLATE_ENDPOINT",
+      "id": 54321,
+      "example_field": "Updated value"
+    }
+  ]
+}"""
 
 POSTS_SYSTEM_PROMPT = """You are a campaign archivist tracking updates for tabletop roleplaying entities in Kanka.
 Your task is to analyze the provided session truth log and generate log posts for eligible entities that experienced notable events, actions, changes, or revelations during the current session.
@@ -210,22 +279,75 @@ Return ONLY a valid JSON array of objects conforming exactly to this structure:
 """
 
 
-def post_posts(posts):
+def post_links(links_raw):
+    logger.info("Uploading links to Kanka...")
+    new_links = links_raw.get("new", [])
+    update_links = links_raw.get("updates", [])
+
+    for link in new_links:
+        url = link.pop("new_url")
+        if not url:
+            continue
+        kanka_post(url=url, data=link)
+
+    for link in update_links:
+        url = link.pop("update_url")
+        id = link.pop("id")
+
+        if not url or not id:
+            continue
+
+        kanka_post(url=url, data=link, mode="PATCH")
+    logger.info("Links uploaded to Kanka successfully!")
+
+
+def generate_links(manifest, truth_log):
+    logger.info("Generating entity links and link updates...")
+    truth_log = "\n".join(truth_log)
+    existing_links = build_existing_links(manifest)
+    manifest = build_manifest_index(manifest)
+    template_str = json.dumps(KANKA_LINKS_TEMPLATES, indent=2)
+    prompt = f"Existing Links:\n{existing_links}\n\nTemplates:\n{template_str}\n\nManifest:\n{manifest}\n\nTruth Log:\n{truth_log}"
+    response = run_gemini_generation(prompt, ENTITY_LINKS_SYSTEM_PROMPT)
+    logger.info("Entity links and link updates generated!")
+    return response
+
+
+def build_existing_links(manifest):
+    logger.info("Building list of existing links...")
+    existing = []
+    for eid, entity in manifest.items():
+        entity_obj = {}
+        for field in KANKA_LINKS_FIELDS:
+            data = entity.get(field)
+            if data:
+                entity_obj[field] = data
+        if entity_obj:
+            existing.append({f"{eid}": entity_obj})
+    logger.info("List of existing links built!")
+    return existing
+
+
+def post_posts(posts, session_data):
     logger.info(f"Uploading {len(posts)} posts to Kanka...")
     for post in posts:
         eid = post.get("entity_id")
+        session_name = f"Session {session_data["Session Number"]}:"
         post["settings"] = {"collapsed": 1}
+        post["position"] = 0
+        if session_name not in post["name"]:
+            post["name"] = f"{session_name} {post["name"]}"
         kanka_post(f"entities/{eid}/posts", post)
     logger.info(f"Posts uploaded {len(posts)} to Kanka successfully!")
 
 
-def generate_posts(gemini_client, entities, truth_log, manifest):
+def generate_posts(entities, truth_log, manifest):
     logger.info("Generating entity posts using Gemini...")
     truth_log = "\n".join(truth_log)
     manifest = build_manifest_index(manifest)
     existing_posts = json.dumps(build_posts_map(entities), indent=2)
     prompt = f"Entities to generate posts for:\n{entities}, Existing entity posts:\n{existing_posts}\n\nManifest:\n{manifest}\n\nTruth Log:\n{truth_log}"
-    response = run_gemini_generation(gemini_client, prompt, POSTS_SYSTEM_PROMPT)
+    response = run_gemini_generation(prompt, POSTS_SYSTEM_PROMPT)
     logger.info("Entity posts generated using Gemini successfully!")
     return response
 
@@ -234,8 +356,9 @@ def post_updates(entities, aliases):
     logger.info("Uploading updates and aliases to Kanka...")
 
     logger.info(f"Uploading {len(entities)} updates to Kanka...")
-    for eid, value in entities.items():
-        id = value.get("id")
+    for value in entities:
+        eid = value.pop("entity_id")
+        id = value.pop("id")
         module = value.pop("module")
         kanka_post(f"{module}/{id}", value, mode="PATCH")
     logger.info(f"{len(entities)} updates uploaded to Kanka successfully!")
@@ -255,7 +378,8 @@ def process_updates(entities, manifest):
     logger.info("Processing entity update results...")
 
     logger.info("Extracting short hand entity data into appropriate fields...")
-    for eid, value in entities.items():
+    for value in entities:
+        eid = value.get("entity_id")
         if value.get("personality"):
             value["personality_name"] = [k for k, v in value["personality"]]
             value["personality_entry"] = [v for k, v in value["personality"]]
@@ -268,7 +392,8 @@ def process_updates(entities, manifest):
 
     logger.info("Extracting aliases from entities...")
     aliases = []
-    for eid, value in entities.items():
+    for value in entities:
+        eid = value.get("entity_id")
         existing_aliases = manifest.get(eid, {}).get("aliases", [])
         if value.get("aliases"):
             for a in value.get("aliases"):
@@ -279,7 +404,8 @@ def process_updates(entities, manifest):
     logger.info("Aliases extracted from entities successfully!")
 
     logger.info("Updating manifest with updates...")
-    for eid, value in entities.items():
+    for value in entities:
+        eid = value.get("entity_id")
         if eid in manifest:
             manifest[eid].update(value)
     logger.info("Manifest updated with updates successfully!")
@@ -313,8 +439,8 @@ def build_posts_map(entities):
 def build_entities_map(entities):
     logger.info("Loading full entity records from campaign data...")
     flat_entities = []
-    for entity in entities:
-        path = ENTITIES_DIR / f"{entity}.json"
+    for eid in entities:
+        path = ENTITIES_DIR / f"{eid}.json"
         flat_entities.append(read_json_file(path))
 
     entities_map = {}
@@ -333,14 +459,14 @@ def build_entities_map(entities):
     return entities_map
 
 
-def generate_updates(gemini_client, entities, truth_log, manifest):
+def generate_updates(entities, truth_log, manifest):
     logger.info("Generating entity updates using Gemini...")
     truth_log = "\n".join(truth_log)
     manifest = build_manifest_index(manifest)
     entities = json.dumps(build_entities_map(entities), indent=2)
     templates_str = json.dumps(KANKA_TEMPLATES, indent=2)
     prompt = f"Entities to update:\n{entities}\n\nTemplates:\n{templates_str}\n\nManifest:\n{manifest}\n\nTruth Log:\n{truth_log}"
-    response = run_gemini_generation(gemini_client, prompt, UPDATES_SYSTEM_PROMPT)
+    response = run_gemini_generation(prompt, UPDATES_SYSTEM_PROMPT)
     logger.info("Entity updates generated using Gemini successfully!")
     return response
 
@@ -370,6 +496,7 @@ def post_new_entities(data):
         module = entity.get("type")
         if not name or not module:
             continue
+        con.print(f" - Posting: {module.title()} - {name.title()}", style="highlight")
         payload = {"name": name}
         response = kanka_post(module, payload)
         id = response.get("entity_id")
@@ -378,12 +505,12 @@ def post_new_entities(data):
     return entity_ids
 
 
-def get_session_entities(gemini_client, manifest, truth_log):
+def get_session_entities(manifest, truth_log):
     logger.info("Identifying new and existing entity updates...")
     manifest = build_manifest_index(manifest)
     truth_text = "\n".join(truth_log)
     prompt = f"Manifest:\n{manifest}\n\nTruth Log:\n{truth_text}"
-    response = run_gemini_generation(gemini_client, prompt, ENTITY_LIST_SYSTEM_PROMPT)
+    response = run_gemini_generation(prompt, ENTITY_LIST_SYSTEM_PROMPT)
     new_entities = response.get("new", [])
     update_entities = response.get("updates", [])
     logger.info(f"Result: {len(new_entities)} New Entities, {len(update_entities)} Existing Entities")
@@ -422,11 +549,11 @@ def convert_to_paragraph(data):
     return "".join(data)
 
 
-def generate_journal(gemini_client, session_data, curr_truth, prev_truth, manifest):
+def generate_journal(session_data, curr_truth, prev_truth, manifest):
     logger.info("Generating journal payload for Kanka...")
 
     logger.info("Building journal payload prompt for gemini...")
-    manifest = json.dumps(manifest, indent=2)
+    manifest = build_manifest_index(manifest)
     curr_truth_text = "\n".join(curr_truth if curr_truth else [])
     curr_truth_html = convert_to_paragraph(curr_truth)
     prev_truth_text = "\n".join(prev_truth if prev_truth else [])
@@ -434,7 +561,7 @@ def generate_journal(gemini_client, session_data, curr_truth, prev_truth, manife
     logger.info("Journal prompt for gemini built successfully!")
 
     logger.info("Generating session summary and name using gemini...")
-    response = run_gemini_generation(gemini_client, prompt, JOURNAL_SYSTEM_PROMPT)
+    response = run_gemini_generation(prompt, JOURNAL_SYSTEM_PROMPT)
     summary = response.get("summary", None)
     post_name = response.get("name", None)
     logger.info("Built session summary and name using gemini successfully!")
@@ -457,19 +584,16 @@ def generate_journal(gemini_client, session_data, curr_truth, prev_truth, manife
     return {"journal": journal_payload, "post": post_payload}
 
 
-def generate_truth_log(gemini_client, session_file, session_data, manifest, prev_truth_log):
+def generate_truth_log(session_file, session_data, manifest, prev_truth_log):
+    logger.info(f"Generating truth log for Session {session_data["Session Number"]}...")
     truth_log_file_name = f"Session {session_data["Session Number"]}.json"
     truth_log_path = TRUTH_LOG_DIR / truth_log_file_name
-    try:
-        uploaded_file = upload_file_to_gemini(gemini_client, session_file)
-        prompt_text = build_truth_log_prompt(session_data, manifest, prev_truth_log)
-        curr_truth_log = run_gemini_generation(gemini_client, prompt_text, TRUTH_LOG_SYSTEM_PROMPT, uploaded_file)
-        dump_to_file(curr_truth_log, truth_log_path, truth_log_file_name)
-        return curr_truth_log
-    finally:
-        if uploaded_file is not None:
-            gemini_client.files.delete(name=uploaded_file.name)
-            logger.info("Remote file cleaned up from Gemini!")
+    uploaded_file = upload_file_to_gemini(session_file)
+    prompt_text = build_truth_log_prompt(session_data, manifest, prev_truth_log)
+    curr_truth_log = run_gemini_generation(prompt_text, TRUTH_LOG_SYSTEM_PROMPT, uploaded_file)
+    dump_to_file(curr_truth_log, truth_log_path, truth_log_file_name)
+    logger.info(f"Session {session_data["Session Number"]} truth log built successfully!")
+    return curr_truth_log
 
 
 def build_truth_log_prompt(session_data, manifest, prev_truth_log):
@@ -479,10 +603,10 @@ def build_truth_log_prompt(session_data, manifest, prev_truth_log):
 - Session Date: {session_data.get('Session Date')}
 
 Campaign Manifest (Known Entities):
-{json.dumps(manifest, indent=2)}
+{build_manifest_index(manifest)}
 
 Previous Session Truth Log:
-{json.dumps(prev_truth_log, indent=2) if prev_truth_log else "None (First session)"}
+{'\n'.join(prev_truth_log) if prev_truth_log else "None (First session)"}
 
 Task:
 Listen to the attached audio session and generate the chronological Truth Log adhering strictly to the system instructions.
@@ -523,24 +647,19 @@ def get_session_data():
     while True:
         con.print("Please provide the following information for this session:")
         try:
-            con.print(" - Session Number: ", end="", style="menu.key")
-            session_num = int(input())
-            if session_num < 0 or session_num > len(list(Path(TRUTH_LOG_DIR).glob("*"))) + 1:
+            session_num = IntPrompt.ask("[menu.key] - Session Number[/]", console=con)
+            if session_num < 0:
                 raise Exception()
-
-            con.print(" - Session Date: (E.G 05/11/2026) ", end="", style="menu.key")
-            session_date = datetime.strptime(input(), "%d/%m/%y").date()
+            session_date = Prompt.ask("[menu.key] - Session Date (E.G 05/11/2026)[/]", console=con)
+            session_date = datetime.strptime(session_date, "%d/%m/%y").date()
 
             session_data = {"Session Number": session_num, "Session Date": session_date}
 
             build_table(session_data, ["Key", "Value"], "Current Session Settings")
-            con.print("Is this information correct? (Blank for yes) ", end="", style="menu.key")
-            response = input()
-            if not response:
+            if Confirm.ask("[menu.key]Is this information correct?[/]", console=con, default=True):
                 break
 
         except Exception as e:
-            print(e)
             con.print("Invalid data entered. Please try again", style="warning")
             input("Press enter to continue ")
 
@@ -548,8 +667,7 @@ def get_session_data():
     return session_data
 
 
-def run_ingest_pipeline(data):
-    gemini_client = data.get("gemini_client")
+def run_ingest_pipeline():
     con.rule("Session Ingest", style="rule.header")
 
     try:
@@ -561,18 +679,18 @@ def run_ingest_pipeline(data):
 
         use_existing = False
         if curr_truth_log:
-            con.print("Would you like to use the existing truth log?: (Blank for yes) ", end="", style="menu.key")
-            if not input():
-                use_existing = True
+            use_existing = Confirm.ask(
+                "[menu.key]Would you like to use the existing truth log?[/]", console=con, default=True
+            )
 
         if not use_existing:
             session_file = prompt_for_file()
 
             con.rule("Truth Log Generation", style="rule.section")
-            curr_truth_log = generate_truth_log(gemini_client, session_file, session_data, manifest, prev_truth_log)
+            curr_truth_log = generate_truth_log(session_file, session_data, manifest, prev_truth_log)
 
         con.rule("Entity Identification", style="rule.section")
-        results = get_session_entities(gemini_client, manifest, curr_truth_log)
+        results = get_session_entities(manifest, curr_truth_log)
         new_entities = []
         if results.get("new"):
             new_entities = post_new_entities(results)
@@ -580,17 +698,24 @@ def run_ingest_pipeline(data):
         entities_to_update = build_entity_list(results, new_entities)
 
         con.rule("Entity Update Generation", style="rule.section")
-        updates_raw = generate_updates(gemini_client, entities_to_update, curr_truth_log, manifest)
+        updates_raw = generate_updates(entities_to_update, curr_truth_log, manifest)
         if updates_raw:
             updates, aliases = process_updates(updates_raw, manifest)
             post_updates(updates, aliases)
+            manifest = get_kanka_data()
         else:
             logger.info("No updates to process!")
 
+        con.rule("Entity Linking", style="rule.section")
+        links_raw = generate_links(manifest, curr_truth_log)
+        if links_raw:
+            post_links(links_raw)
+            manifest = get_kanka_data()
+
         con.rule("Post Generation", style="rule.section")
-        posts = generate_posts(gemini_client, entities_to_update, curr_truth_log, manifest)
+        posts = generate_posts(entities_to_update, curr_truth_log, manifest)
         if posts:
-            post_posts(posts)
+            post_posts(posts, session_data)
         else:
             logger.info("No posts to process!")
 
@@ -599,12 +724,12 @@ def run_ingest_pipeline(data):
 
         use_existing = False
         if curr_journal:
-            con.print("Would you like to use the existing journal entry?: (Blank for yes) ", end="", style="menu.key")
-            if not input():
-                use_existing = True
+            use_existing = Confirm.ask(
+                "[menu.key]Would you like to use the existing journal entry?[/]", console=con, default=True
+            )
 
         if not use_existing:
-            journal_payloads = generate_journal(gemini_client, session_data, curr_truth_log, prev_truth_log, manifest)
+            journal_payloads = generate_journal(session_data, curr_truth_log, prev_truth_log, manifest)
             curr_journal = upload_journal(journal_payloads, curr_journal, True if curr_journal else False)
 
     except Exception as e:

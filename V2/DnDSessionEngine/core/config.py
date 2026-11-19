@@ -1,7 +1,9 @@
 from DnDSessionEngine.core.theme import con
 from DnDSessionEngine.core.helpers import build_table
 from prompt_toolkit import prompt
+from prompt_toolkit.formatted_text import HTML
 from pathlib import Path
+from rich.prompt import Confirm
 import sys
 import json
 import logging
@@ -27,28 +29,31 @@ APP_DATA = APP_ROOT / "AppData"
 
 CONFIG_DIR = APP_DATA / "config"
 LOGS_DIR = APP_DATA / "logs"
-MODELS_DIR = APP_DATA / "models"
+RUNTIME_DIR = APP_DATA / "runtime"
+VULKAN_DIR = RUNTIME_DIR / "vulkan"
+CPU_DIR = RUNTIME_DIR / "cpu"
+MODEL_DIR = APP_DATA / "model"
 CAMPAIGN_DIR = APP_DATA / "campaign"
 TRUTH_LOG_DIR = CAMPAIGN_DIR / "truth_logs"
 ENTITIES_DIR = CAMPAIGN_DIR / "entities"
-
-
-DIRECTORIES = [CONFIG_DIR, LOGS_DIR, MODELS_DIR, CAMPAIGN_DIR, TRUTH_LOG_DIR, ENTITIES_DIR]
-
-CONFIG_PATH = CONFIG_DIR / "config.json"
 MANIFEST_PATH = CAMPAIGN_DIR / "manifest.json"
+CONFIG_PATH = CONFIG_DIR / "config.json"
+
+DIRECTORIES = [CONFIG_DIR, LOGS_DIR, VULKAN_DIR, CPU_DIR, MODEL_DIR, CAMPAIGN_DIR, TRUTH_LOG_DIR, ENTITIES_DIR]
 
 GEMINI_RETRIES = 3
-LLM_REPO_ID = "microsoft/Phi-4-mini-instruct-onnx"
-LLM_REPO_FOLDER = "gpu"
-LLM_REPO_NAME = LLM_REPO_ID.split("/")[-1]
+MODEL_OPTIONS = {
+    "small": {"name": "Model A", "url": "", "filename": ""},
+    "medium": {"name": "Model A", "url": "", "filename": ""},
+    "large": {"name": "Model A", "url": "", "filename": ""},
+}
 
 DEFAULT_CONFIG = {
     "Gemini API Key": "",
     "Gemini Models": "gemini-3.8-flash, gemini-3.7-flash, gemini-3.6-flash, gemini-3.5-flash",
     "Kanka Campaign ID": "",
     "Kanka Token": "",
-    "LLM Processor ID": "0",
+    "Model Size": "large",
 }
 
 
@@ -85,16 +90,19 @@ def initialise_config():
         missing = any(v.strip() == "" for v in curr_config.values())
 
         if not missing:
-            con.print("Would you like to edit the config?: (Blank for no) ", end="", style="menu.key")
-            if not input().strip():
+            if not Confirm.ask("[menu.key]Would you like to edit the config?[/]", console=con, default=False):
                 con.print("Configuration accepted.", style="success")
                 break
 
         con.rule("Editing Configuration", style="rule.sub")
         for key, value in curr_config.items():
-            con.print(f" - {key}:", end="", style="menu.key")
-            curr_config[key] = prompt(f" ", default=value)
+            curr_config[key] = prompt(HTML(f"<style fg='ansiyellow'><b> - {key}: </b></style>"), default=value)
             changed = True
+            if key == "Model Size":
+                if curr_config[key] not in ["small", "medium", "large"]:
+                    con.print(f"Invalid Choice: {curr_config[key]}! Must be small, medium or large!", style="danger")
+                    curr_config[key] = ""
+                    input("Press enter to continue")
         con.rule("Updated Values", style="rule.sub")
 
     if changed:

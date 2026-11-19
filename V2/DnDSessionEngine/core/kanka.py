@@ -32,7 +32,7 @@ def build_campaign_data(campaign_data):
 
             file_name = f"{record_id}.json"
             entity_file_path = ENTITIES_DIR / file_name
-            dump_to_file(record, entity_file_path, f"{module} {name} ({record_id})")
+            dump_to_file(record, entity_file_path)
     logger.info("Campaign json data files build successfully!")
 
 
@@ -76,8 +76,8 @@ def build_manifest_index(manifest):
         id = value.get("id")
         module = value.get("module")
         name = value.get("name", "").strip()
-        aliases = value.get("aliases")
-        summary = value.get("summary") or ""
+        aliases = value.get("aliases", [])
+        summary = value.get("summary", "")
 
         if not name:
             continue
@@ -112,6 +112,7 @@ def build_manifest(campaign_data):
                 "entity_id": record.get("entity_id"),
                 "module": module,
                 "type": record.get("type"),
+                "organisations": record.get("organisations", {}).get("data", []),
                 "summary": create_summary(record),
             }
 
@@ -134,6 +135,11 @@ def filter_entity(raw, module=None):
         if key == "entity_assets":
             clean["aliases"] = [a["name"] for a in value if a.get("type_id") == 3]
             continue
+
+        if key == "organisations":
+            new_value = value.get("data", [])
+            if new_value:
+                value = new_value
 
         if key == "traits":
             appearance = [[t.get("name"), t.get("entry")] for t in value if t.get("section") == "appearance"]
@@ -206,7 +212,7 @@ def kanka_post(url="", data=None, timeout=10.0, mode="POST", *args, **kwargs):
             if response.ok:
                 break
         except requests.exceptions.HTTPError as e:
-            processed = process_http_error(0, data)
+            processed = process_http_error(e, data)
             if not isinstance(processed, bool):
                 data = processed
             if not processed:
@@ -238,7 +244,7 @@ def kanka_get(url="", timeout=10.0, *args, **kwargs):
 
 
 def process_http_error(error, obj=None):
-    if not error.get("response", {}).get("status_code"):
+    if not error.response or not error.response.status_code:
         print(error)
         return False
 
@@ -257,7 +263,7 @@ def process_http_error(error, obj=None):
         logger.error("Upload Failed, incorrect payload format!")
         if obj:
             with open("PAYLOAD.json", "w") as file:
-                json.dumps(obj, file)
+                json.dump(obj, file)
             con.print("Payload saved to 'PAYLOAD.json'.", type="highlight")
             con.print(
                 "Please update and safe the file and press enter. if the payload is not fixable, enter any value: ",
@@ -266,7 +272,7 @@ def process_http_error(error, obj=None):
             response = input()
             if not response:
                 with open("PAYLOAD.json", "r") as file:
-                    obj = json.loads(file)
+                    obj = json.load(file)
                     os.remove("PAYLOAD.json")
                     return obj
             return False

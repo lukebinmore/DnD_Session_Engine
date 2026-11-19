@@ -47,7 +47,11 @@ KANKA_DISREGARD_ENTRIES = [
     "is_personality_visible",
     "is_personality_pinned",
     "is_appearance_pinned",
+    "settings",
+    "pin_id",
 ]
+
+KANKA_LINKS_FIELDS = ["organisations"]
 
 KANKA_MODULES = [
     "characters",
@@ -64,7 +68,7 @@ NAME = {
     "type": "string",
     "required": "yes",
     "action": "default",
-    "description": "The name representing the entity",
+    "description": "The name representing the entity. Update the actual name when revealled.",
 }
 
 ALIASES = {
@@ -78,7 +82,7 @@ ENTRY = {
     "type": "string",
     "required": "yes",
     "action": "default",
-    "description": "A thematic description based on what is known about this entity",
+    "description": "A three paragraph thematic description based on what is known about this entity, split into three sections, each wrapped in <p></p> tags. 1. a thematic description of the entity as a whole, 2. appearance and visual / audio details, 3. key details and identifying facts.",
 }
 
 TITLE = {
@@ -193,7 +197,7 @@ KANKA_TEMPLATES = {
             "type": "array of integers",
             "required": "no",
             "action": "default",
-            "description": "A list of the ids (not entity_id) of any known creators of this item",
+            "description": "A list of the entity_ids (not ids) of any known creators of this item",
         },
         "price": {
             "type": "string",
@@ -237,4 +241,41 @@ KANKA_TEMPLATES = {
         "locations": LOCATIONS,
         "status_id": STATUS_ID,
     },
+}
+
+KANKA_LINKS_TEMPLATES = {
+    "organisation_members": {
+        "organisation_id": {
+            "type": "integer",
+            "required": "yes",
+            "action": "fill if empty",
+            "description": "The organinsations id (not entity_id).",
+        },
+        "character_id": {
+            "type": "integer",
+            "required": "yes",
+            "action": "fill if empty",
+            "description": "The characters id (not entity_id).",
+        },
+        "role": {
+            "type": "string",
+            "required": "yes",
+            "action": "default",
+            "description": "The characters role in the organisation. e.g. Clerk, Henchman, Ring Leader, Accountant, etc.",
+        },
+        "status_id": {
+            "type": "integer",
+            "required": "yes",
+            "action": "default",
+            "description": "The status id for the member in the organisation. (1 = Active Member, 2 = Past Member, 3 = Unknown).",
+        },
+        "parent_id": {
+            "type": "integer",
+            "required": "no",
+            "action": "default",
+            "description": "The character id (not entity_id) of this characters boss in the organisation.",
+        },
+        "new_url": "organisations/(organisation_id)/organisation_members",
+        "update_url": "organisations/(organisation_id)/organisation_members/[id]",
+    }
 }

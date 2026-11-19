@@ -13,6 +13,8 @@ logger = logging.getLogger(__name__)
 
 DELAY = 10
 
+GEMINI_CLIENT = None
+
 
 def delay(attempt):
     if attempt < GEMINI_RETRIES:
@@ -24,7 +26,7 @@ def delay(attempt):
             delay += -1
 
 
-def run_gemini_generation(gemini_client, prompt, system_prompt=None, uploaded_file=None):
+def run_gemini_generation(prompt, system_prompt=None, uploaded_file=None):
     candidates = load_config("Gemini Models").split(",")
     logger.info(f"Generating response with Gemini with {len(candidates)} possible models...")
 
@@ -33,60 +35,67 @@ def run_gemini_generation(gemini_client, prompt, system_prompt=None, uploaded_fi
     contents = [prompt]
     contents.append(uploaded_file) if uploaded_file else None
 
-    for model_name in candidates:
-        model_name = model_name.strip()
-        logger.info(f"Attempting generation with model: {model_name}...")
+    try:
+        for model_name in candidates:
+            model_name = model_name.strip()
+            logger.info(f"Attempting generation with model: {model_name}...")
 
-        for attempt in range(1, GEMINI_RETRIES + 1):
-            try:
-                response_stream = gemini_client.models.generate_content_stream(
-                    model=model_name, contents=contents, config=config
-                )
+            for attempt in range(1, GEMINI_RETRIES + 1):
+                try:
+                    response_stream = GEMINI_CLIENT.models.generate_content_stream(
+                        model=model_name, contents=contents, config=config
+                    )
 
-                con.print("Receiving response : ", end="", style="highlight")
-                chunks = []
-                with Live(
-                    "[highlight]Receiving stream from Gemini...[/] [success](Waiting for first chunk)[/]",
-                    console=con,
-                    refresh_per_second=8,
-                    transient=False,
-                ) as live:
-                    for chunk in response_stream:
-                        if chunk.text:
-                            chunks.append(chunk.text)
-                            live.update(
-                                f"[highlight]Receiving stream from Gemini...[/] [success]({len(chunks)} chunks collected)[/]"
-                            )
+                    con.print("Receiving response : ", end="", style="highlight")
+                    chunks = []
+                    with Live(
+                        "[highlight]Receiving stream from Gemini...[/] [success](Waiting for first chunk)[/]",
+                        console=con,
+                        refresh_per_second=8,
+                        transient=False,
+                    ) as live:
+                        for chunk in response_stream:
+                            if chunk.text:
+                                chunks.append(chunk.text)
+                                live.update(
+                                    f"[highlight]Receiving stream from Gemini...[/] [success]({len(chunks)} chunks collected)[/]"
+                                )
 
-                    live.update(f"[highlight]Receiving stream from Gemini, Done![/] [success](All chunks collected)[/]")
+                        live.update(
+                            f"[highlight]Receiving stream from Gemini, Done![/] [success](All chunks collected)[/]"
+                        )
 
-                raw_text = "".join(chunks).strip()
-                response_json = json.loads(raw_text)
+                    raw_text = "".join(chunks).strip()
+                    response_json = json.loads(raw_text)
 
-                if isinstance(response_json, list) or isinstance(response_json, dict):
-                    logger.info(f"Generation successful with {model_name} (attempt {attempt})!")
-                    return response_json
+                    if isinstance(response_json, list) or isinstance(response_json, dict):
+                        logger.info(f"Generation successful with {model_name} (attempt {attempt})!")
+                        return response_json
 
-                logger.warning(f"Model {model_name} returned valid JSON, but not a list. Retrying...")
-            except APIError as e:
-                if getattr(e, "code", None) == 429 or "RESOURCE_EXHAUSTED" in str(e):
-                    logger.warning(f"Rate limit hit for {model_name}. Skipping to next candidate!")
-                    break
-                logger.warning(f"API error on attempt {attempt} for {model_name}: {e}")
-                delay(attempt)
+                    logger.warning(f"Model {model_name} returned valid JSON, but not a list. Retrying...")
+                except APIError as e:
+                    if getattr(e, "code", None) == 429 or "RESOURCE_EXHAUSTED" in str(e):
+                        logger.warning(f"Rate limit hit for {model_name}. Skipping to next candidate!")
+                        break
+                    logger.warning(f"API error on attempt {attempt} for {model_name}: {e}")
+                    delay(attempt)
 
-            except json.JSONDecodeError as e:
-                logger.warning(f"Invalid JSON returned on attempt {attempt} for {model_name}: {e}")
-                delay(attempt)
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Invalid JSON returned on attempt {attempt} for {model_name}: {e}")
+                    delay(attempt)
 
-            except Exception as e:
-                logger.warning(f"Unexpected error on attempt {attempt} for {model_name}: {e}")
-                delay(attempt)
+                except Exception as e:
+                    logger.warning(f"Unexpected error on attempt {attempt} for {model_name}: {e}")
+                    delay(attempt)
 
-    raise RuntimeError("All candidate models and retries failed to generate a valid response!")
+        raise RuntimeError("All candidate models and retries failed to generate a valid response!")
+    finally:
+        if uploaded_file is not None:
+            GEMINI_CLIENT.files.delete(name=uploaded_file.name)
+            logger.info("Remote file cleaned up from Gemini!")
 
 
-def upload_file_to_gemini(gemini_client, session_file):
+def upload_file_to_gemini(session_file):
     logger.info(f"Uploading {session_file["name"]} to Gemini...")
     mime_type, _ = mimetypes.guess_type(session_file["path"])
     if not mime_type:
@@ -96,12 +105,12 @@ def upload_file_to_gemini(gemini_client, session_file):
             mime_type = "application/octet-stream"
 
     uploaded_file = None
-    uploaded_file = gemini_client.files.upload(file=session_file["path"], config={"mime_type": mime_type})
+    uploaded_file = GEMINI_CLIENT.files.upload(file=session_file["path"], config={"mime_type": mime_type})
 
     while uploaded_file.state.name == "PROCESSING":
         con.print("Waiting for file to upload...", style="warning")
         time.sleep(3)
-        uploaded_file = gemini_client.files.get(name=uploaded_file.name)
+        uploaded_file = GEMINI_CLIENT.files.get(name=uploaded_file.name)
 
     if uploaded_file.state.name != "ACTIVE":
         raise RuntimeError(f"File upload failed with state: {uploaded_file.state.name}")
@@ -111,13 +120,13 @@ def upload_file_to_gemini(gemini_client, session_file):
 
 
 def initialise_gemini():
+    global GEMINI_CLIENT
     logger.info("Initialising Gemini...")
     gemini_api_key = load_config("Gemini API Key")
     try:
-        client = Client(api_key=gemini_api_key)
-        _ = next(iter(client.models.list()))
+        GEMINI_CLIENT = Client(api_key=gemini_api_key)
+        _ = next(iter(GEMINI_CLIENT.models.list()))
         logger.info("Initialising Gemini, Done!")
-        return client
     except Exception as e:
         logger.error(f"Failed to create Gemini AI client!")
         raise e

@@ -7,10 +7,11 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def dump_to_file(data, path, title):
+def dump_to_file(data, path, title=None):
     with path.open("w", encoding="utf-8") as file:
         json.dump(data, file, indent=4)
-    logger.info(f"{title.title()} saved to disk! Path: {path}!")
+    if title:
+        logger.info(f"{title.title()} saved to disk! Path: {path}!")
 
 
 def prompt_for_file():
