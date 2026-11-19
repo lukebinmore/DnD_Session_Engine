@@ -1,7 +1,6 @@
 from DnDSessionEngine.core.theme import con
 from DnDSessionEngine.core.config import VULKAN_DIR, CPU_DIR, MODEL_DIR, load_config
 from rich.progress import Progress, TextColumn, BarColumn, DownloadColumn, TransferSpeedColumn, TimeRemainingColumn
-from rich.live import Live
 import urllib.request
 import zipfile
 import re

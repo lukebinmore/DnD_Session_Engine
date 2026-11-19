@@ -1,11 +1,10 @@
 from DnDSessionEngine.core.theme import con
-from DnDSessionEngine.core.helpers import build_table
+from DnDSessionEngine.core.helpers import build_table, read_json_file, dump_to_file
 from prompt_toolkit import prompt
 from prompt_toolkit.formatted_text import HTML
 from pathlib import Path
 from rich.prompt import Confirm
 import sys
-import json
 import logging
 
 logger = logging.getLogger(__name__)
@@ -37,6 +36,7 @@ CAMPAIGN_DIR = APP_DATA / "campaign"
 TRUTH_LOG_DIR = CAMPAIGN_DIR / "truth_logs"
 ENTITIES_DIR = CAMPAIGN_DIR / "entities"
 MANIFEST_PATH = CAMPAIGN_DIR / "manifest.json"
+DATABASE_PATH = CAMPAIGN_DIR / "campaign.db"
 CONFIG_PATH = CONFIG_DIR / "config.json"
 
 DIRECTORIES = [CONFIG_DIR, LOGS_DIR, VULKAN_DIR, CPU_DIR, MODEL_DIR, CAMPAIGN_DIR, TRUTH_LOG_DIR, ENTITIES_DIR]
@@ -66,13 +66,8 @@ def initialise_directories():
 
 def initialise_config():
     logger.info("Initialising Config...")
-    if not CONFIG_PATH.exists():
-        with CONFIG_PATH.open("w", encoding="utf-8") as file:
-            json.dump(DEFAULT_CONFIG, file, indent=4)
-
-    with CONFIG_PATH.open("r", encoding="utf-8") as file:
-        curr_config = json.load(file)
-
+    dump_to_file(DEFAULT_CONFIG, CONFIG_PATH) if not CONFIG_PATH.exists() else None
+    curr_config = read_json_file(CONFIG_PATH)
     changed = False
 
     for section, default in DEFAULT_CONFIG.items():
@@ -106,19 +101,16 @@ def initialise_config():
         con.rule("Updated Values", style="rule.sub")
 
     if changed:
-        with CONFIG_PATH.open("w", encoding="utf-8") as file:
-            json.dump(curr_config, file, indent=4)
-        logger.info("Configuration saved to disk.")
+        dump_to_file(curr_config, CONFIG_PATH, "Configuration")
     logger.info("Initialising Config, Done!")
 
 
 def load_config(key=None):
     try:
-        with CONFIG_PATH.open("r", encoding="utf-8") as file:
-            config = json.load(file)
-            if key:
-                return config[key]
-            return config
+        config = read_json_file(CONFIG_PATH)
+        if key:
+            return config[key]
+        return config
     except Exception:
         logger.error("Failed to load config!")
         raise

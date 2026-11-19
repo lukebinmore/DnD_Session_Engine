@@ -1,6 +1,6 @@
 from DnDSessionEngine.core.theme import con
 from DnDSessionEngine.core.config import load_config, GEMINI_RETRIES, TRUTH_LOG_DIR
-from DnDSessionEngine.core.file_manager import dump_to_file
+from DnDSessionEngine.core.helpers import dump_to_file
 from rich.live import Live
 from google.genai import types, Client
 from google.genai.errors import APIError

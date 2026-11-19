@@ -1,5 +1,6 @@
 from DnDSessionEngine.core.theme import con
 from DnDSessionEngine.core.config import initialise_directories, initialise_config
+from DnDSessionEngine.core.database import initialise_database
 from DnDSessionEngine.core.logging import initialise_logging
 from DnDSessionEngine.core.local_llm import initialise_llm
 from DnDSessionEngine.core.gemini import initialise_gemini
@@ -19,6 +20,9 @@ def startup():
 
         con.rule("Config", style="rule.section")
         initialise_config()
+
+        con.rule("Database", style="rule.section")
+        initialise_database()
 
         con.rule("Local Model", style="rule.section")
         initialise_llm()

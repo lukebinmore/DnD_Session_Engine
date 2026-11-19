@@ -1,6 +1,6 @@
 from DnDSessionEngine.core.theme import con
 from DnDSessionEngine.core.config import load_config, MANIFEST_PATH, ENTITIES_DIR
-from DnDSessionEngine.core.file_manager import dump_to_file
+from DnDSessionEngine.core.helpers import dump_to_file
 from DnDSessionEngine.core.kanka_config import KANKA_MODULES, KANKA_DISREGARD_ENTRIES
 from rich.live import Live
 import time
@@ -180,11 +180,11 @@ def filter_entity(raw, module=None):
     return clean
 
 
-def get_kanka_data():
+def get_kanka_data(kanka_modules=KANKA_MODULES):
     campaign_data = {}
     campaign_data_orig = {}
     logger.info("Pulling entities from campaign...")
-    for module in KANKA_MODULES:
+    for module in kanka_modules:
         try:
             records = kanka_get(f"{module}?related=1")
             campaign_data_orig[module] = [record for record in records]

@@ -1,7 +1,7 @@
 from DnDSessionEngine.core.theme import con
 from DnDSessionEngine.core.kanka import get_kanka_data, kanka_post, build_manifest_index
 from DnDSessionEngine.core.kanka_config import KANKA_TEMPLATES, KANKA_LINKS_FIELDS, KANKA_LINKS_TEMPLATES
-from DnDSessionEngine.core.file_manager import prompt_for_file, read_json_file, dump_to_file
+from DnDSessionEngine.core.helpers import prompt_for_file, read_json_file, dump_to_file
 from DnDSessionEngine.core.config import TRUTH_LOG_DIR, ENTITIES_DIR
 from DnDSessionEngine.core.helpers import build_table
 from DnDSessionEngine.core.gemini import upload_file_to_gemini, run_gemini_generation

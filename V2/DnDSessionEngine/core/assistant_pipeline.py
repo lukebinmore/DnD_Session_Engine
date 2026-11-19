@@ -8,8 +8,6 @@ logger = logging.getLogger(__name__)
 
 def run_assistant_pipeline():
     con.rule("AI Campaign Assistant Setup", style="rule.header")
-    con.rule("Kanka Data Retrieval", style="rule.section")
-    manifest = get_kanka_data()
     con.rule("LLM Server Setup", style="rule.section")
     launch_llm_server()
 
